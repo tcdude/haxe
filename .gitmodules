@@ -1,6 +1,8 @@
 [submodule "libs"]
 	path = libs
-	url = https://github.com/HaxeFoundation/ocamllibs.git
+	url = ../ocamllibs
+	branch = master
 [submodule "extra/haxelib_src"]
 	path = extra/haxelib_src
-	url = https://github.com/HaxeFoundation/haxelib.git
+	url = ../haxelib
+	branch = master
