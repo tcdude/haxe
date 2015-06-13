@@ -70,7 +70,7 @@ exception Abort
 exception Completion of string
 
 
-let version = 3200
+let version = 3300
 let version_major = version / 1000
 let version_minor = (version mod 1000) / 100
 let version_revision = (version mod 100)
@@ -978,7 +978,7 @@ and do_connect host port args =
 
 and init ctx =
 	let usage = Printf.sprintf
-		"Haxe Compiler %s - (C)2005-2015 Haxe Foundation\n Usage : haxe%s -main <class> [-swf|-js|-neko|-php|-cpp|-as3] <output> [options]\n Options :"
+		"Haxe Compiler %s - (C)2005-2015 Haxe Foundation\n Usage : haxe%s -main <class> [-swf|-js|-neko|-php|-cpp|-as3|-cs|-java|-python] <output> [options]\n Options :"
 		s_version (if Sys.os_type = "Win32" then ".exe" else "")
 	in
 	let com = ctx.com in
@@ -1097,7 +1097,7 @@ try
 				| _ -> 	if List.mem var reserved_flags then raise (Arg.Bad (var ^ " is a reserved compiler flag and cannot be defined from command line"));
 			end;
 			Common.raw_define com var;
-		),"<var> : define a conditional compilation flag");
+		),"<var[=value]> : define a conditional compilation flag");
 		("-v",Arg.Unit (fun () ->
 			com.verbose <- true
 		),": turn on verbose mode");
@@ -1112,7 +1112,7 @@ try
 			| "std" | "full" | "no" -> ()
 			| _ -> raise (Arg.Bad "Invalid DCE mode, expected std | full | no"));
 			Common.define_value com Define.Dce mode
-		),"[std|full|no] : set the dead code elimination mode");
+		),"[std|full|no] : set the dead code elimination mode (default std)");
 		("-swf-version",Arg.Float (fun v ->
 			if not !swf_version || com.flash_version < v then com.flash_version <- v;
 			swf_version := true;
@@ -1290,7 +1290,6 @@ try
 		("--interp", Arg.Unit (fun() ->
 			Common.define com Define.Interp;
 			set_platform Neko "";
-			no_output := true;
 			interp := true;
 		),": interpret the program using internal macro system");
 		("--macro", Arg.String (fun e ->
@@ -1484,7 +1483,7 @@ try
 	end else begin
 		ctx.setup();
 		Common.log com ("Classpath : " ^ (String.concat ";" com.class_path));
-		Common.log com ("Defines : " ^ (String.concat ";" (PMap.foldi (fun v _ acc -> v :: acc) com.defines [])));
+		Common.log com ("Defines : " ^ (String.concat ";" (PMap.foldi (fun k v acc -> (match v with "1" -> k | _ -> k ^ "=" ^ v) :: acc) com.defines [])));
 		let t = Common.timer "typing" in
 		Typecore.type_expr_ref := (fun ctx e with_type -> Typer.type_expr ctx e with_type);
 		let tctx = Typer.create com in
@@ -1529,45 +1528,44 @@ try
 			| Cpp | Cs | Java | Php -> Common.mkdir_from_path (com.file ^ "/.")
 			| _ -> Common.mkdir_from_path com.file
 		end;
-		(match com.platform with
-		| _ when !no_output ->
+		if not !no_output then begin
 			if !interp then begin
 				let ctx = Interp.create com (Typer.make_macro_api tctx Ast.null_pos) in
 				Interp.add_types ctx com.types (fun t -> ());
 				(match com.main with
 				| None -> ()
 				| Some e -> ignore(Interp.eval_expr ctx e));
-			end;
-		| Cross ->
-			()
-		| Flash when Common.defined com Define.As3 ->
-			Common.log com ("Generating AS3 in : " ^ com.file);
-			Genas3.generate com;
-		| Flash ->
-			Common.log com ("Generating swf : " ^ com.file);
-			Genswf.generate com !swf_header;
-		| Neko ->
-			Common.log com ("Generating neko : " ^ com.file);
-			Genneko.generate com;
-		| Js ->
-			Common.log com ("Generating js : " ^ com.file);
-			Genjs.generate com
-		| Php ->
-			Common.log com ("Generating PHP in : " ^ com.file);
-			Genphp.generate com;
-		| Cpp ->
-			Common.log com ("Generating Cpp in : " ^ com.file);
-			Gencpp.generate com;
-		| Cs ->
-			Common.log com ("Generating Cs in : " ^ com.file);
-			Gencs.generate com;
-		| Java ->
-			Common.log com ("Generating Java in : " ^ com.file);
-			Genjava.generate com;
-		| Python ->
-			Common.log com ("Generating python in : " ^ com.file);
-			Genpy.generate com;
-		);
+			end else if com.platform = Cross then
+				()
+			else begin
+				let generate,name = match com.platform with
+				| Flash when Common.defined com Define.As3 ->
+					Genas3.generate,"AS3"
+				| Flash ->
+					Genswf.generate !swf_header,"swf"
+				| Neko ->
+					Genneko.generate,"neko"
+				| Js ->
+					Genjs.generate,"js"
+				| Php ->
+					Genphp.generate,"php"
+				| Cpp ->
+					Gencpp.generate,"cpp"
+				| Cs ->
+					Gencs.generate,"cs"
+				| Java ->
+					Genjava.generate,"java"
+				| Python ->
+					Genpy.generate,"python"
+				| Cross ->
+					assert false
+				in
+				Common.log com ("Generating " ^ name ^ ": " ^ com.file);
+				let t = Common.timer ("generate " ^ name) in
+				generate com;
+				t()
+			end
+		end
 	end;
 	Sys.catch_break false;
 	List.iter (fun f -> f()) (List.rev com.final_filters);

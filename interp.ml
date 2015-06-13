@@ -116,6 +116,7 @@ type extern_api = {
 	get_expected_type : unit -> t option;
 	get_call_arguments : unit -> Ast.expr list option;
 	get_local_method : unit -> string;
+	get_local_imports : unit -> Ast.import list;
 	get_local_using : unit -> tclass list;
 	get_local_vars : unit -> (string, Type.tvar) PMap.t;
 	get_build_fields : unit -> value;
@@ -212,6 +213,7 @@ let make_complex_type_ref = ref (fun _ -> assert false)
 let encode_tvar_ref = ref (fun _ -> assert false)
 let decode_path_ref = ref (fun _ -> assert false)
 let decode_import_ref = ref (fun _ -> assert false)
+let encode_import_ref = ref (fun _ -> assert false)
 let get_ctx() = (!get_ctx_ref)()
 let enc_array (l:value list) : value = (!enc_array_ref) l
 let dec_array (l:value) : value list = (!dec_array_ref) l
@@ -229,7 +231,8 @@ let enc_string (s:string) : value = (!enc_string_ref) s
 let make_complex_type (t:Type.t) : Ast.complex_type = (!make_complex_type_ref) t
 let encode_tvar (v:tvar) : value = (!encode_tvar_ref) v
 let decode_path (v:value) : Ast.type_path = (!decode_path_ref) v
-let decode_import (v:value) : ((string * Ast.pos) list * Ast.import_mode) = (!decode_import_ref) v
+let encode_import (i:Ast.import) : value = (!encode_import_ref) i
+let decode_import (v:value) : Ast.import = (!decode_import_ref) v
 
 let to_int f = Int32.of_float (mod_float f 2147483648.0)
 let need_32_bits i = Int32.compare (Int32.logand (Int32.add i 0x40000000l) 0x80000000l) Int32.zero <> 0
@@ -276,8 +279,8 @@ let constants =
 	"$";"add";"remove";"has";"__t";"module";"isPrivate";"isPublic";"isExtern";"isInterface";"exclude";
 	"constructs";"names";"superClass";"interfaces";"fields";"statics";"constructor";"init";"t";
 	"gid";"uid";"atime";"mtime";"ctime";"dev";"ino";"nlink";"rdev";"size";"mode";"pos";"len";
-	"binops";"unops";"from";"to";"array";"op";"isPostfix";"impl";
-	"id";"capture";"extra";"v";"ids";"vars";"en";"overrides";"status"];
+	"binops";"unops";"from";"to";"array";"op";"isPostfix";"impl";"resolve";
+	"id";"capture";"extra";"v";"ids";"vars";"en";"overrides";"status";"overloads";"path"];
 	h
 
 let h_get = hash "__get" and h_set = hash "__set"
@@ -2212,7 +2215,7 @@ let macro_lib =
 		);
 		"on_generate", Fun1 (fun f ->
 			match f with
-			| VFunction (Fun1 _) ->
+			| VFunction (Fun1 _) | VClosure _ ->
 				let ctx = get_ctx() in
 				ctx.curapi.on_generate (fun tl ->
 					ignore(catch_errors ctx (fun() -> ctx.do_call VNull f [enc_array (List.map encode_type tl)] null_pos));
@@ -2520,6 +2523,9 @@ let macro_lib =
 		);
 		"local_using", Fun0 (fun() ->
 			enc_array (List.map encode_clref ((get_ctx()).curapi.get_local_using()))
+		);
+		"local_imports", Fun0 (fun() ->
+			enc_array (List.map encode_import ((get_ctx()).curapi.get_local_imports()))
 		);
 		"local_vars", Fun1 (fun as_var ->
 			let as_var = match as_var with
@@ -3663,6 +3669,7 @@ type enum_index =
 	| IModuleType
 	| IFieldAccess
 	| IAnonStatus
+	| IImportMode
 
 let enum_name = function
 	| IExpr -> "ExprDef"
@@ -3683,9 +3690,10 @@ let enum_name = function
 	| IModuleType -> "ModuleType"
 	| IFieldAccess -> "FieldAccess"
 	| IAnonStatus -> "AnonStatus"
+	| IImportMode -> "ImportMode"
 
 let init ctx =
-	let enums = [IExpr;IBinop;IUnop;IConst;ITParam;ICType;IField;IType;IFieldKind;IMethodKind;IVarAccess;IAccess;IClassKind;ITypedExpr;ITConstant;IModuleType;IFieldAccess;IAnonStatus] in
+	let enums = [IExpr;IBinop;IUnop;IConst;ITParam;ICType;IField;IType;IFieldKind;IMethodKind;IVarAccess;IAccess;IClassKind;ITypedExpr;ITConstant;IModuleType;IFieldAccess;IAnonStatus;IImportMode] in
 	let get_enum_proto e =
 		match get_path ctx ["haxe";"macro";enum_name e] null_pos with
 		| VObject e ->
@@ -3810,6 +3818,18 @@ let encode_unop op =
 	in
 	enc_enum IUnop tag []
 
+let encode_import (path,mode) =
+	let tag,pl = match mode with
+		| INormal -> 0, []
+		| IAsName s -> 1, [enc_string s]
+		| IAll -> 2,[]
+	in
+	let mode = enc_enum IImportMode tag pl in
+	enc_obj [
+		"path", enc_array (List.map (fun (name,p) -> enc_obj [ "pos", encode_pos p; "name", enc_string name]) path);
+		"mode", mode
+	]
+
 let rec encode_path t =
 	let fields = [
 		"pack", enc_array (List.map enc_string t.tpackage);
@@ -3883,6 +3903,7 @@ and encode_tparam_decl tp =
 		"name", enc_string tp.tp_name;
 		"params", enc_array (List.map encode_tparam_decl tp.tp_params);
 		"constraints", enc_array (List.map encode_ctype tp.tp_constraints);
+		"meta", encode_meta_content tp.tp_meta;
 	]
 
 and encode_fun f =
@@ -4119,6 +4140,7 @@ and decode_tparam_decl v =
 		tp_name = dec_string (field v "name");
 		tp_constraints = (match field v "constraints" with VNull -> [] | a -> List.map decode_ctype (dec_array a));
 		tp_params = decode_tparams (field v "params");
+		tp_meta = decode_meta_content (field v "meta");
 	}
 
 and decode_fun v =
@@ -4371,6 +4393,7 @@ and encode_tabstract a =
 		"from", enc_array ((List.map (fun t -> enc_obj [ "t",encode_type t; "field",VNull]) a.a_from) @ (List.map (fun (t,cf) -> enc_obj [ "t",encode_type t; "field",encode_cfield cf]) a.a_from_field));
 		"to", enc_array ((List.map (fun t -> enc_obj [ "t",encode_type t; "field",VNull]) a.a_to) @ (List.map (fun (t,cf) -> enc_obj [ "t",encode_type t; "field",encode_cfield cf]) a.a_to_field));
 		"array", enc_array (List.map encode_cfield a.a_array);
+		"resolve", (match a.a_resolve with None -> VNull | Some cf -> encode_cfref cf)
 	]
 
 and encode_efield f =
@@ -4395,6 +4418,7 @@ and encode_cfield f =
 		"kind", encode_field_kind f.cf_kind;
 		"pos", encode_pos f.cf_pos;
 		"doc", null enc_string f.cf_doc;
+		"overloads", encode_ref f.cf_overloads (encode_array encode_cfield) (fun() -> "overloads");
 	]
 
 and encode_field_kind k =
@@ -4759,7 +4783,7 @@ let decode_cfield v =
 		cf_kind = decode_field_kind (field v "kind");
 		cf_params = decode_type_params (field v "params");
 		cf_expr = None;
-		cf_overloads = [];
+		cf_overloads = decode_ref (field v "overloads");
 	}
 
 let decode_efield v =
@@ -5009,26 +5033,7 @@ let rec make_ast e =
 		in
 		if snd mp = snd p then p else (fst mp) @ [snd mp],snd p
 	in
-	let mk_path (pack,name) p =
-		match List.rev pack with
-		| [] -> (EConst (Ident name),p)
-		| pl ->
-			let rec loop = function
-				| [] -> assert false
-				| [n] -> (EConst (Ident n),p)
-				| n :: l -> (EField (loop l, n),p)
-			in
-			(EField (loop pl,name),p)
-	in
-	let mk_const = function
-		| TInt i -> Int (Int32.to_string i)
-		| TFloat s -> Float s
-		| TString s -> String s
-		| TBool b -> Ident (if b then "true" else "false")
-		| TNull -> Ident "null"
-		| TThis -> Ident "this"
-		| TSuper -> Ident "super"
-	in
+	let mk_path = expr_of_type_path in
 	let mk_ident = function
 		| "`trace" -> Ident "trace"
 		| n -> Ident n
@@ -5036,7 +5041,7 @@ let rec make_ast e =
 	let eopt = function None -> None | Some e -> Some (make_ast e) in
 	((match e.eexpr with
 	| TConst c ->
-		EConst (mk_const c)
+		EConst (tconst_to_const c)
 	| TLocal v -> EConst (mk_ident v.v_name)
 	| TArray (e1,e2) -> EArray (make_ast e1,make_ast e2)
 	| TBinop (op,e1,e2) -> EBinop (op, make_ast e1, make_ast e2)
@@ -5049,7 +5054,7 @@ let rec make_ast e =
 	| TNew (c,pl,el) -> ENew ((match (try make_type (TInst (c,pl)) with Exit -> make_type (TInst (c,[]))) with CTPath p -> p | _ -> assert false),List.map make_ast el)
 	| TUnop (op,p,e) -> EUnop (op,p,make_ast e)
 	| TFunction f ->
-		let arg (v,c) = v.v_name, false, mk_ot v.v_type, (match c with None -> None | Some c -> Some (EConst (mk_const c),e.epos)) in
+		let arg (v,c) = v.v_name, false, mk_ot v.v_type, (match c with None -> None | Some c -> Some (EConst (tconst_to_const c),e.epos)) in
 		EFunction (None,{ f_params = []; f_args = List.map arg f.tf_args; f_type = mk_ot f.tf_type; f_expr = Some (make_ast f.tf_expr) })
 	| TVar (v,eo) ->
 		EVars ([v.v_name, mk_ot v.v_type, eopt eo])
@@ -5103,3 +5108,4 @@ decode_texpr_ref := decode_texpr;
 encode_tvar_ref := encode_tvar;
 decode_path_ref := decode_path;
 decode_import_ref := decode_import;
+encode_import_ref := encode_import;

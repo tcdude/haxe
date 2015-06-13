@@ -236,7 +236,7 @@ module Simplifier = struct
 			with Exit ->
 				begin match follow e.etype with
 					| TAbstract({a_path = [],"Void"},_) -> true
-					| TInst ({ cl_path = [],"Array" }, _) when com.platform = Cpp -> true
+					(* | TInst ({ cl_path = [],"Array" }, _) when com.platform = Cpp -> true *)
 					| _ -> false
 				end
 		in
@@ -365,6 +365,7 @@ module Simplifier = struct
 				let e1 = match e1.eexpr with
 					| TFunction _ -> loop e1
 					| TArrayDecl [{eexpr = TFunction _}] -> loop e1
+					| TNew(_,_,el) when not (List.exists Optimizer.has_side_effect el) -> loop e1 (* issue #4322 *)
 					| _ -> bind ~allow_tlocal:true e1
 				in
 				{e with eexpr = TVar(v,Some e1)}
@@ -765,6 +766,8 @@ module Ssa = struct
 		| TLocal v ->
 			begin try eval_cond ctx (get_var_value v)
 			with Not_found -> [] end
+		| TParenthesis e1 | TMeta(_,e1) | TCast(e1,None) ->
+			eval_cond ctx e1
 		| _ ->
 			[]
 
@@ -776,37 +779,38 @@ module Ssa = struct
 			ctx.var_conds <- IntMap.add v.v_id [cond] ctx.var_conds
 		end
 
-(* 	let apply_cond ctx = function
-		| Equal({v_extra = Some(_,Some {eexpr = TLocal v})} as v0,e1) ->
-			let v' = assign_var ctx v (mk_loc v0 e1.epos) e1.epos in
-			append_cond ctx v' (Equal(v',e1)) e1.epos
-		| NotEqual({v_extra = Some(_,Some {eexpr = TLocal v})} as v0,e1) ->
-			let v' = assign_var ctx v (mk_loc v0 e1.epos) e1.epos in
-			append_cond ctx v' (NotEqual(v',e1)) e1.epos
-		| _ -> ()
+	let apply_cond ctx = function
+		| Equal(v,e1) ->
+			(* let v' = assign_var ctx (get_origin_var v) (mk_loc v e1.epos) e1.epos in
+			append_cond ctx v' (Equal(v',e1)) e1.epos *)
+			()
+		| NotEqual(v,e1) ->
+			(* let v' = assign_var ctx (get_origin_var v) (mk_loc v e1.epos) e1.epos in
+			append_cond ctx v' (NotEqual(v',e1)) e1.epos *)
+			()
 
 	let apply_not_null_cond ctx v p =
-		apply_cond ctx (NotEqual(v,(mk (TConst TNull) t_dynamic p))) *)
+		apply_cond ctx (NotEqual(v,(mk (TConst TNull) t_dynamic p)))
 
 	let apply com e =
 		let rec handle_if ctx f econd eif eelse =
 			let econd = loop ctx econd in
-			(* let cond = eval_cond ctx econd in *)
+			let cond = eval_cond ctx econd in
 			let join = mk_join_node() in
 			let close = branch ctx eif.epos in
-			(* List.iter (apply_cond ctx) cond; *)
+			List.iter (apply_cond ctx) cond;
 			let eif = loop ctx eif in
 			close join;
 			let eelse = match eelse with
 				| None ->
-					(* let cond = invert_conds cond in *)
-					(* List.iter (apply_cond ctx) cond; *)
+					let cond = invert_conds cond in
+					List.iter (apply_cond ctx) cond;
 					add_branch join ctx.cur_data e.epos;
 					None
 				| Some e ->
 					let close = branch ctx e.epos in
-					(* let cond = invert_conds cond in *)
-					(* List.iter (apply_cond ctx) cond; *)
+					let cond = invert_conds cond in
+					List.iter (apply_cond ctx) cond;
 					let eelse = loop ctx e in
 					close join;
 					Some eelse
@@ -843,15 +847,15 @@ module Ssa = struct
 				let close = branch ctx e.epos in
 				List.iter (fun (v,co) ->
 					declare_var ctx v e.epos;
-(* 					match co with
+					match co with
 						| Some TNull when (match v.v_type with TType({t_path=["haxe"],"PosInfos"},_) -> false | _ -> true) -> ()
-						| _ -> apply_not_null_cond ctx v e.epos *)
+						| _ -> apply_not_null_cond ctx v e.epos
 				) tf.tf_args;
 				let e' = loop ctx tf.tf_expr in
 				close (mk_join_node());
 				{e with eexpr = TFunction {tf with tf_expr = e'}}
 			(* var modifications *)
-			| TBinop(OpAssign,({eexpr = TLocal v} as e1),e2) when v.v_name <> "this" ->
+			| TBinop(OpAssign,({eexpr = TLocal v} as e1),e2) ->
 				let e2 = loop ctx e2 in
 				let _ = assign_var ctx v e2 e1.epos in
 				{e with eexpr = TBinop(OpAssign,e1,e2)}
@@ -912,7 +916,7 @@ module Ssa = struct
 				e
 			| TFor(v,e1,ebody) ->
 				declare_var ctx v e.epos;
-				(* apply_not_null_cond ctx v e1.epos; *)
+				apply_not_null_cond ctx v e1.epos;
 				let v' = IntMap.find v.v_id ctx.cur_data.nd_var_map in
 				let e1 = loop ctx e1 in
 				let ebody = handle_loop_body ctx ebody in
@@ -928,7 +932,7 @@ module Ssa = struct
 				close_join_node ctx join_ex e.epos;
 				let catches = List.map (fun (v,e) ->
 					declare_var ctx v e.epos;
-					(* apply_not_null_cond ctx v e.epos; *)
+					apply_not_null_cond ctx v e.epos;
 					let close = branch ctx e.epos in
 					let e = loop ctx e in
 					close join_bottom;
@@ -1064,6 +1068,8 @@ module ConstPropagation = struct
 			end
 		| TEnumParameter _ when not (com.platform = Php) ->
 			Ssa.get_var_usage_count v0 <= 1
+		| TField(_,FEnum _) ->
+			Ssa.get_var_usage_count v0 <= 1
 		| _ ->
 			false
 
@@ -1113,6 +1119,11 @@ module ConstPropagation = struct
 				e
 			else
 				value ssa force e'
+		| TCall ({ eexpr = TField ({eexpr = TTypeExpr (TClassDecl c) },fa)},el) ->
+			let el = List.map (value ssa force) el in
+			(match Optimizer.api_inline2 ssa.com c (field_name fa) el e.epos with
+			| None -> e
+			| Some e -> value ssa force e)
 		| TCall (({eexpr = TLocal {v_name = "__ssa_phi__"}} as ephi),el) ->
 			let el = List.map (value ssa force) el in
 			begin match el with
@@ -1131,7 +1142,7 @@ module ConstPropagation = struct
 				e'
 			else
 				e
- 		| TEnumParameter(e1,ef,i) ->
+		| TEnumParameter(e1,ef,i) ->
 			let ev = value ssa true e1 in
 			begin try
 				value ssa force (semi_awkward_enum_value ssa ev i)
@@ -1139,10 +1150,14 @@ module ConstPropagation = struct
 				e
 			end
 		| _ ->
-			e
+			try
+				let ct = awkward_get_enum_index2 ssa e in
+				{e with eexpr = TConst ct}
+			with Not_found ->
+				e
 
 	(* TODO: the name is quite accurate *)
-	let awkward_get_enum_index ssa e =
+	and awkward_get_enum_index2 ssa e =
 		let e = awkward_get_enum_index ssa.com e in
 		let ev = (value ssa true e) in
 		match ev.eexpr with
@@ -1180,7 +1195,16 @@ module ConstPropagation = struct
 					else loop e
 				in
 				let el = Codegen.UnificationCallback.check_call check el e1.etype in
-				{e with eexpr = TCall(e1,el)}
+				let e = {e with eexpr = TCall(e1,el)} in
+				begin match e1.eexpr with
+					| TField({eexpr = TTypeExpr (TClassDecl c)},fa) ->
+						begin match Optimizer.api_inline2 ssa.com c (field_name fa) el e.epos with
+							| None -> e
+							| Some e -> loop e
+						end
+					| _ ->
+						e
+				end
 (* 			| TField(e1,fa) ->
 				let e1' = loop e1 in
 				let fa = if e1' != e1 then
@@ -1234,7 +1258,7 @@ module ConstPropagation = struct
 				let rec check_constant e = match e.eexpr with
 					| TConst ct -> ct
 					| TParenthesis e1 | TCast(e1,None) | TMeta(_,e1) -> check_constant e1
-					| _ -> awkward_get_enum_index ssa e
+					| _ -> raise Not_found
 				in
 				begin try
 					let ct = check_constant e1 in
@@ -1255,7 +1279,11 @@ module ConstPropagation = struct
 					{e with eexpr = TSwitch(e1,cases,edef)}
 				end
 			| _ ->
-				Type.map_expr loop e
+				try
+					let ct = awkward_get_enum_index2 ssa e in
+					{e with eexpr = TConst ct}
+				with Not_found ->
+					Type.map_expr loop e
 		in
 		loop e
 end
@@ -1484,6 +1512,9 @@ module LocalDce = struct
 			| TVar(v,Some e1) when not (is_used v) ->
 				let e1 = if has_side_effect e1 then loop true e1 else e1 in
 				e1
+			| TVar(v,Some e1) ->
+				let e1 = loop true e1 in
+				{e with eexpr = TVar(v,Some e1)}
 			| TWhile(e1,e2,flag) ->
 				collect e2;
 				let e2 = loop false e2 in
@@ -1550,7 +1581,7 @@ module Config = struct
 			ssa_apply = true;
 			const_propagation = not (Common.raw_defined com "analyzer-no-const-propagation");
 			check_has_effect = (Common.raw_defined com "analyzer-check-has-effect");
-			check = not (Common.raw_defined com "analyzer-no-check");
+			check = (Common.raw_defined com "analyzer-check-null");
 			local_dce = not (Common.raw_defined com "analyzer-no-local-dce") && not (Common.defined com Define.As3);
 			ssa_unapply = not (Common.raw_defined com "analyzer-no-ssa-unapply");
 			simplifier_unapply = not (Common.raw_defined com "analyzer-no-simplify-unapply");

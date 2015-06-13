@@ -2711,8 +2711,10 @@ let configure gen =
 
 	if not erase_generics then HardNullableSynf.configure gen (HardNullableSynf.traverse gen
 		(fun e ->
-			match real_type e.etype with
-				| TInst({ cl_path = (["haxe";"lang"], "Null") }, [t]) ->
+			match e.eexpr, real_type e.etype with
+				| TConst TThis, _ when gen.gcurrent_path = (["haxe";"lang"], "Null") ->
+					e
+				| _, TInst({ cl_path = (["haxe";"lang"], "Null") }, [t]) ->
 					let e = { e with eexpr = TParenthesis(e) } in
 					{ (mk_field_access gen e "value" e.epos) with etype = t }
 				| _ ->
@@ -3291,8 +3293,6 @@ let configure gen =
 
 	TypeParams.RenameTypeParameters.run gen;
 
-	let t = Common.timer "code generation" in
-
 	let parts = Str.split_delim (Str.regexp "[\\/]+") gen.gcon.file in
 	mkdir_recursive "" parts;
 	generate_modules gen "cs" "src" module_gen out_files;
@@ -3308,9 +3308,7 @@ let configure gen =
 		print_endline cmd;
 		if gen.gcon.run_command cmd <> 0 then failwith "Build failed";
 		Sys.chdir old_dir;
-	end;
-
-	t()
+	end
 
 (* end of configure function *)
 
@@ -3742,6 +3740,7 @@ let convert_ilmethod ctx p m is_explicit_impl =
 				tp_name = "M" ^ string_of_int t.tnumber;
 				tp_params = [];
 				tp_constraints = [];
+				tp_meta = [];
 			}
 		) m.mtypes in
 		FFun {
@@ -3910,6 +3909,7 @@ let convert_delegate ctx p ilcls =
 			tp_name = "T" ^ string_of_int t.tnumber;
 			tp_params = [];
 			tp_constraints = [];
+			tp_meta = [];
 		}
 	) ilcls.ctypes in
 	let mk_op_fn op name p =
@@ -4091,6 +4091,7 @@ let convert_ilclass ctx p ?(delegate=false) ilcls = match ilcls.csuper with
 					tp_name = "T" ^ string_of_int p.tnumber;
 					tp_params = [];
 					tp_constraints = [];
+					tp_meta = [];
 				}) ilcls.ctypes
 			in
 

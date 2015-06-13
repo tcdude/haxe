@@ -154,6 +154,11 @@ let rec make_meta name params ((v,p2) as e) p1 =
 	| _ ->
 		EMeta((name,params,p1),e),punion p1 p2
 
+let make_is e t p =
+	let e_is = EField((EConst(Ident "Std"),p),"is"),p in
+	let e2 = expr_of_type_path (t.tpackage,t.tname) p in
+	ECall(e_is,[e;e2]),p
+
 let reify in_macro =
 	let cur_pos = ref None in
 	let mk_enum ename n vl p =
@@ -524,10 +529,6 @@ let lower_ident_or_macro = parser
 	| [< '(Const (Ident i),p) when is_lower_ident i >] -> i
 	| [< '(Kwd Macro,_) >] -> "macro"
 	| [< '(Kwd Extern,_) >] -> "extern"
-
-let any_enum_ident = parser
-	| [< i = ident >] -> i
-	| [< '(Kwd k,p) when Filename.basename p.pfile = "StdTypes.hx" >] -> s_keyword k, p
 
 let property_ident = parser
 	| [< i, _ = ident >] -> i
@@ -941,7 +942,7 @@ and parse_enum s =
 	let doc = get_doc s in
 	let meta = parse_meta s in
 	match s with parser
-	| [< name, p1 = any_enum_ident; params = parse_constraint_params; s >] ->
+	| [< name, p1 = ident; params = parse_constraint_params; s >] ->
 		let args = (match s with parser
 		| [< '(POpen,_); l = psep Comma parse_enum_param; '(PClose,_) >] -> l
 		| [< >] -> []
@@ -1045,7 +1046,7 @@ and parse_constraint_params = parser
 	| [< >] -> []
 
 and parse_constraint_param = parser
-	| [< name = type_name; s >] ->
+	| [< meta = parse_meta; name = type_name; s >] ->
 		let params = (match s with parser
 			| [< >] -> []
 		) in
@@ -1061,6 +1062,7 @@ and parse_constraint_param = parser
 			tp_name = name;
 			tp_params = params;
 			tp_constraints = ctl;
+			tp_meta = meta;
 		}
 
 and parse_class_herit = parser
@@ -1201,11 +1203,17 @@ and expr = parser
 			make_meta name params (secure_expr s) p
 		with Display e ->
 			display (make_meta name params e p))
-	| [< '(BrOpen,p1); b = block1; '(BrClose,p2); s >] ->
-		let e = (b,punion p1 p2) in
-		(match b with
-		| EObjectDecl _ -> expr_next e s
-		| _ -> e)
+	| [< '(BrOpen,p1); s >] ->
+		if is_resuming p1 then display (EDisplay ((EObjectDecl [],p1),false),p1);
+		(match s with parser
+		| [< '(Binop OpOr,p2) when do_resume() >] ->
+			set_resume p1;
+			display (EDisplay ((EObjectDecl [],p1),false),p1);
+		| [< b = block1; '(BrClose,p2); s >] ->
+			let e = (b,punion p1 p2) in
+			(match b with
+			| EObjectDecl _ -> expr_next e s
+			| _ -> e))
 	| [< '(Kwd Macro,p); s >] ->
 		parse_macro_expr p s
 	| [< '(Kwd Var,p1); v = parse_var_decl >] -> (EVars [v],p1)
@@ -1222,6 +1230,9 @@ and expr = parser
 			| [< t = parse_type_hint; '(PClose,p2); s >] ->
 				let ep = EParenthesis (ECheckType(e,t),punion p1 p2), punion p1 p2 in
 				expr_next (ECast (ep,None),punion p1 (pos ep)) s
+			| [< '(Const (Ident "is"),_); t = parse_type_path; '(PClose,p2); >] ->
+				let e_is = make_is e t (punion p1 p2) in
+				expr_next (ECast (e_is,None),punion p1 (pos e_is)) s
 			| [< '(PClose,p2); s >] ->
 				let ep = expr_next (EParenthesis(e),punion pp p2) s in
 				expr_next (ECast (ep,None),punion p1 (pos ep)) s
@@ -1236,6 +1247,7 @@ and expr = parser
 	| [< '(POpen,p1); e = expr; s >] -> (match s with parser
 		| [< '(PClose,p2); s >] -> expr_next (EParenthesis e, punion p1 p2) s
 		| [< t = parse_type_hint; '(PClose,p2); s >] -> expr_next (EParenthesis (ECheckType(e,t),punion p1 p2), punion p1 p2) s
+		| [< '(Const (Ident "is"),_); t = parse_type_path; '(PClose,p2); >] -> expr_next (make_is e t (punion p1 p2)) s
 		| [< >] -> serror())
 	| [< '(BkOpen,p1); l = parse_array_decl; '(BkClose,p2); s >] -> expr_next (EArrayDecl l, punion p1 p2) s
 	| [< '(Kwd Function,p1); e = parse_function p1 false; >] -> e

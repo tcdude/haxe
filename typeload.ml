@@ -131,6 +131,7 @@ let make_module ctx mpath file tdecls loadp =
 				a_impl = None;
 				a_array = [];
 				a_this = mk_mono();
+				a_resolve = None;
 			} in
 			decls := (TAbstractDecl a, decl) :: !decls;
 			match d.d_data with
@@ -200,7 +201,7 @@ let make_module ctx mpath file tdecls loadp =
 				(match !decls with
 				| (TClassDecl c,_) :: _ ->
 					List.iter (fun m -> match m with
-						| ((Meta.Build | Meta.CoreApi | Meta.Allow | Meta.Access | Meta.Enum | Meta.Dce),_,_) ->
+						| ((Meta.Build | Meta.CoreApi | Meta.Allow | Meta.Access | Meta.Enum | Meta.Dce | Meta.Native),_,_) ->
 							c.cl_meta <- m :: c.cl_meta;
 						| _ ->
 							()
@@ -412,13 +413,23 @@ let rec load_instance ctx t p allow_no_params =
 			) t.tparams in
 			let rec loop tl1 tl2 is_rest = match tl1,tl2 with
 				| t :: tl1,(name,t2) :: tl2 ->
-					let isconst = (match t with TInst ({ cl_kind = KExpr _ },_) -> true | _ -> false) in
-					if isconst <> (name = "Const") && t != t_dynamic && name <> "Rest" then error (if isconst then "Constant value unexpected here" else "Constant value excepted as type parameter") p;
+					let check_const c =
+						let is_expression = (match t with TInst ({ cl_kind = KExpr _ },_) -> true | _ -> false) in
+						let expects_expression = name = "Const" || Meta.has Meta.Const c.cl_meta in
+						let accepts_expression = name = "Rest" in
+						if is_expression then begin
+							if not expects_expression && not accepts_expression then
+								error "Constant value unexpected here" p
+						end else if expects_expression then
+							error "Constant value excepted as type parameter" p
+					in
 					let is_rest = is_rest || name = "Rest" && is_generic_build in
 					let t = match follow t2 with
-						| TInst ({ cl_kind = KTypeParameter [] }, []) when not is_generic ->
+						| TInst ({ cl_kind = KTypeParameter [] } as c, []) when not is_generic ->
+							check_const c;
 							t
 						| TInst (c,[]) ->
+							check_const c;
 							let r = exc_protect ctx (fun r ->
 								r := (fun() -> t);
 								delay ctx PCheckConstraint (fun() -> check_param_constraints ctx types t tparams c p);
@@ -654,6 +665,7 @@ let hide_params ctx =
 		module_using = [];
 		module_globals = PMap.empty;
 		wildcard_packages = [];
+		module_imports = [];
 	};
 	ctx.type_params <- [];
 	(fun() ->
@@ -1000,8 +1012,16 @@ let check_interfaces ctx c =
 	List.iter (fun (intf,params) -> check_interface ctx c intf params) c.cl_implements
 
 let rec return_flow ctx e =
-	let error() = display_error ctx "A return is missing here" e.epos; raise Exit in
+	let error() =
+		display_error ctx (Printf.sprintf "Missing return: %s" (s_type (print_context()) ctx.ret)) e.epos; raise Exit
+	in
 	let return_flow = return_flow ctx in
+	let rec uncond e = match e.eexpr with
+		| TIf _ | TWhile _ | TSwitch _ | TTry _ -> ()
+		| TReturn _ | TThrow _ -> raise Exit
+		| _ -> Type.iter uncond e
+	in
+	let has_unconditional_flow e = try uncond e; false with Exit -> true in
 	match e.eexpr with
 	| TReturn _ | TThrow _ -> ()
 	| TParenthesis e | TMeta(_,e) ->
@@ -1010,7 +1030,7 @@ let rec return_flow ctx e =
 		let rec loop = function
 			| [] -> error()
 			| [e] -> return_flow e
-			| { eexpr = TReturn _ } :: _ | { eexpr = TThrow _ } :: _ -> ()
+			| e :: _ when has_unconditional_flow e -> ()
 			| _ :: l -> loop l
 		in
 		loop el
@@ -1413,11 +1433,12 @@ let set_heritance ctx c herits p =
 	) herits in
 	List.iter loop (List.filter (ctx.g.do_inherit ctx c p) herits)
 
-let rec type_type_params ?(enum_constructor=false) ctx path get_params p tp =
+let rec type_type_param ?(enum_constructor=false) ctx path get_params p tp =
 	let n = tp.tp_name in
 	let c = mk_class ctx.m.curmod (fst path @ [snd path],n) p in
-	c.cl_params <- List.map (type_type_params ctx c.cl_path get_params p) tp.tp_params;
+	c.cl_params <- type_type_params ctx c.cl_path get_params p tp.tp_params;
 	c.cl_kind <- KTypeParameter [];
+	c.cl_meta <- tp.Ast.tp_meta;
 	if enum_constructor then c.cl_meta <- (Meta.EnumConstructorParam,[],c.cl_pos) :: c.cl_meta;
 	let t = TInst (c,List.map snd c.cl_params) in
 	match tp.tp_constraints with
@@ -1444,11 +1465,17 @@ let rec type_type_params ?(enum_constructor=false) ctx path get_params p tp =
 		delay ctx PForce (fun () -> ignore(!r()));
 		n, TLazy r
 
+and type_type_params ?(enum_constructor=false) ctx path get_params p tpl =
+	let names = ref [] in
+	List.map (fun tp ->
+		if List.mem tp.tp_name !names then display_error ctx ("Duplicate type parameter name: " ^ tp.tp_name) p;
+		names := tp.tp_name :: !names;
+		type_type_param ~enum_constructor ctx path get_params p tp
+	) tpl
+
 let type_function_params ctx fd fname p =
 	let params = ref [] in
-	params := List.map (fun tp ->
-		type_type_params ctx ([],fname) (fun() -> !params) p tp
-	) fd.f_params;
+	params := type_type_params ctx ([],fname) (fun() -> !params) p fd.f_params;
 	!params
 
 let find_enclosing com e =
@@ -1550,21 +1577,25 @@ let type_function ctx args ret fmode f do_display p =
 		| TMeta((Meta.MergeBlock,_,_), ({eexpr = TBlock el} as e1)) -> e1
 		| _ -> e
 	in
-	let rec loop e =
-		match e.eexpr with
-		| TReturn (Some e) -> (match follow e.etype with TAbstract({a_path = [],"Void"},[]) -> () | _ -> raise Exit)
-		| TFunction _ -> ()
-		| _ -> Type.iter loop e
+	let has_return e =
+		let rec loop e =
+			match e.eexpr with
+			| TReturn (Some _) -> raise Exit
+			| TFunction _ -> ()
+			| _ -> Type.iter loop e
+		in
+		try loop e; false with Exit -> true
 	in
-	let have_ret = (try loop e; false with Exit -> true) in
-	if have_ret then
-		(try return_flow ctx e with Exit -> ())
-	else (try type_eq EqStrict ret ctx.t.tvoid with Unify_error _ ->
-		match e.eexpr with
-		(* accept final throw (issue #1923) *)
-		| TThrow _ -> ()
-		| TBlock el when (match List.rev el with ({eexpr = TThrow _} :: _) -> true | _ -> false) -> ()
-		| _ -> display_error ctx ("Missing return " ^ (s_type (print_context()) ret)) p);
+	begin match follow ret with
+		| TAbstract({a_path=[],"Void"},_) -> ()
+		(* We have to check for the presence of return expressions here because
+		   in the case of Dynamic ctx.ret is still a monomorph. If we indeed
+		   don't have a return expression we can link the monomorph to Void. We
+		   can _not_ use type_iseq to avoid the Void check above because that
+		   would turn Dynamic returns to Void returns. *)
+		| TMono t when not (has_return e) -> ignore(link t ret ctx.t.tvoid)
+		| _ -> (try return_flow ctx e with Exit -> ())
+	end;
 	let rec loop e =
 		match e.eexpr with
 		| TCall ({ eexpr = TConst TSuper },_) -> raise Exit
@@ -1714,29 +1745,10 @@ let init_core_api ctx c =
 	| _ -> error "Constructor differs from core type" c.cl_pos)
 
 let check_global_metadata ctx f_add mpath tpath so =
-	let sl1 = if mpath = tpath then
-		(fst tpath) @ [snd tpath]
-	else
-		(fst mpath) @ [snd mpath;snd tpath]
-	in
+	let sl1 = full_dot_path mpath tpath in
 	let sl1,field_mode = match so with None -> sl1,false | Some s -> sl1 @ [s],true in
 	List.iter (fun (sl2,m,(recursive,to_types,to_fields)) ->
-		let rec loop sl1 sl2 = match sl1,sl2 with
-			| [],[] ->
-				true
-			(* always recurse into types of package paths *)
-			| (s1 :: s11 :: _),[s2] when is_lower_ident s2 && not (is_lower_ident s11)->
-				s1 = s2
-			| [_],[""] ->
-				true
-			| _,([] | [""]) ->
-				recursive
-			| [],_ ->
-				false
-			| (s1 :: sl1),(s2 :: sl2) ->
-				s1 = s2 && loop sl1 sl2
-		in
-		let add = ((field_mode && to_fields) || (not field_mode && to_types)) && (loop sl1 sl2) in
+		let add = ((field_mode && to_fields) || (not field_mode && to_types)) && (match_path recursive sl1 sl2) in
 		if add then f_add m
 	) ctx.g.global_metadata
 
@@ -2274,24 +2286,12 @@ let init_class ctx c p context_init herits fields =
 					let m = mk_mono() in
 					let ta = TAbstract(a, List.map (fun _ -> mk_mono()) a.a_params) in
 					let tthis = if Meta.has Meta.Impl f.cff_meta || Meta.has Meta.To f.cff_meta then monomorphs a.a_params a.a_this else a.a_this in
-					let check_bind () =
-						if fd.f_expr = None then begin
-							if inline then error (f.cff_name ^ ": Inline functions must have an expression") f.cff_pos;
-							begin match fd.f_type with
-								| None -> error (f.cff_name ^ ": Functions without expressions must have an explicit return type") f.cff_pos
-								| Some _ -> ()
-							end;
-							cf.cf_meta <- (Meta.NoExpr,[],cf.cf_pos) :: cf.cf_meta;
-							do_add := false;
-							do_bind := false;
-						end
-					in
+					let allows_no_expr = ref (Meta.has Meta.CoreType a.a_meta) in
 					let rec loop ml = match ml with
 						| (Meta.From,_,_) :: _ ->
-							if is_macro then error (f.cff_name ^ ": Macro cast functions are not supported") p;
 							let r = fun () ->
 								(* the return type of a from-function must be the abstract, not the underlying type *)
-								(try type_eq EqStrict ret ta with Unify_error l -> error (error_msg (Unify l)) p);
+								if not is_macro then (try type_eq EqStrict ret ta with Unify_error l -> error (error_msg (Unify l)) p);
 								match t with
 									| TFun([_,_,t],_) -> t
 									| _ -> error (f.cff_name ^ ": @:from cast functions must accept exactly one argument") p
@@ -2328,10 +2328,9 @@ let init_class ctx c p context_init herits fields =
 							) "@:to" in
 							delay ctx PForce (fun() -> ignore ((!r)()));
 							a.a_to_field <- (TLazy r, cf) :: a.a_to_field
-						| (Meta.ArrayAccess,_,_) :: _ ->
+						| ((Meta.ArrayAccess,_,_) | (Meta.Op,[(EArrayDecl _),_],_)) :: _ ->
 							if is_macro then error (f.cff_name ^ ": Macro array-access functions are not supported") p;
 							a.a_array <- cf :: a.a_array;
-							if Meta.has Meta.CoreType a.a_meta then check_bind();
 						| (Meta.Op,[EBinop(op,_,_),_],_) :: _ ->
 							if is_macro then error (f.cff_name ^ ": Macro operator functions are not supported") p;
 							let targ = if Meta.has Meta.Impl f.cff_meta then tthis else ta in
@@ -2347,13 +2346,13 @@ let init_class ctx c p context_init herits fields =
 							if not (left_eq || right_eq) then error (f.cff_name ^ ": The left or right argument type must be " ^ (s_type (print_context()) targ)) f.cff_pos;
 							if right_eq && Meta.has Meta.Commutative f.cff_meta then error (f.cff_name ^ ": @:commutative is only allowed if the right argument is not " ^ (s_type (print_context()) targ)) f.cff_pos;
 							a.a_ops <- (op,cf) :: a.a_ops;
-							check_bind();
+							allows_no_expr := true;
 						| (Meta.Op,[EUnop(op,flag,_),_],_) :: _ ->
 							if is_macro then error (f.cff_name ^ ": Macro operator functions are not supported") p;
 							let targ = if Meta.has Meta.Impl f.cff_meta then tthis else ta in
 							(try type_eq EqStrict t (tfun [targ] (mk_mono())) with Unify_error l -> raise (Error ((Unify l),f.cff_pos)));
 							a.a_unops <- (op,flag,cf) :: a.a_unops;
-							check_bind();
+							allows_no_expr := true;
 						| (Meta.Impl,_,_) :: ml when f.cff_name <> "_new" && not is_macro ->
 							begin match follow t with
 								| TFun((_,_,t1) :: _, _) when type_iseq tthis t1 ->
@@ -2362,7 +2361,8 @@ let init_class ctx c p context_init herits fields =
 									display_error ctx ("First argument of implementation function must be " ^ (s_type (print_context()) tthis)) f.cff_pos
 							end;
 							loop ml
-(* 						| (Meta.Resolve,_,_) :: _ ->
+						| ((Meta.Resolve,_,_) | (Meta.Op,[EField _,_],_)) :: _ ->
+							if a.a_resolve <> None then error "Multiple resolve methods are not supported" cf.cf_pos;
 							let targ = if Meta.has Meta.Impl f.cff_meta then tthis else ta in
 							begin match follow t with
 								| TFun([(_,_,t1);(_,_,t2)],_) ->
@@ -2372,13 +2372,27 @@ let init_class ctx c p context_init herits fields =
 									end
 								| _ ->
 									error ("Field type of resolve must be " ^ (s_type (print_context()) targ) ^ " -> String -> T") f.cff_pos
-							end *)
+							end;
+							a.a_resolve <- Some cf;
 						| _ :: ml ->
 							loop ml
 						| [] ->
 							()
 					in
 					loop f.cff_meta;
+					let check_bind () =
+						if fd.f_expr = None then begin
+							if inline then error (f.cff_name ^ ": Inline functions must have an expression") f.cff_pos;
+							begin match fd.f_type with
+								| None -> error (f.cff_name ^ ": Functions without expressions must have an explicit return type") f.cff_pos
+								| Some _ -> ()
+							end;
+							cf.cf_meta <- (Meta.NoExpr,[],cf.cf_pos) :: cf.cf_meta;
+							do_bind := false;
+							if not (Meta.has Meta.CoreType a.a_meta) then do_add := false;
+						end
+					in
+					if !allows_no_expr then check_bind();
 					if f.cff_name = "_new" && Meta.has Meta.MultiType a.a_meta then do_bind := false;
 				| _ ->
 					());
@@ -2568,6 +2582,12 @@ let init_class ctx c p context_init herits fields =
 		| _ :: l ->
 			check_require l
 	in
+	let rec check_if_feature = function
+		| [] -> []
+		| (Meta.IfFeature,el,_) :: _ -> List.map (fun (e,p) -> match e with EConst (String s) -> s | _ -> error "String expected" p) el
+		| _ :: l -> check_if_feature l
+	in
+	let cl_if_feature = check_if_feature c.cl_meta in
 	let cl_req = check_require c.cl_meta in
 	List.iter (fun f ->
 		let p = f.cff_pos in
@@ -2575,15 +2595,11 @@ let init_class ctx c p context_init herits fields =
 			let fd , constr, f, do_add = loop_cf f in
 			let is_static = List.mem AStatic fd.cff_access in
 			if (is_static || constr) && c.cl_interface && f.cf_name <> "__init__" && not is_lib then error "You can't declare static fields in interfaces" p;
-			begin try
-				let _,args,_ = Meta.get Meta.IfFeature f.cf_meta in
-				List.iter (fun e -> match fst e with
-					| EConst(String s) ->
-						ctx.m.curmod.m_extra.m_if_feature <- (s,(c,f,is_static)) :: ctx.m.curmod.m_extra.m_if_feature;
-					| _ ->
-						error "String expected" (pos e)
-				) args
-			with Not_found -> () end;
+			let set_feature s =
+				ctx.m.curmod.m_extra.m_if_feature <- (s,(c,f,is_static)) :: ctx.m.curmod.m_extra.m_if_feature
+			in
+			List.iter set_feature cl_if_feature;
+			List.iter set_feature (check_if_feature f.cf_meta);
 			let req = check_require fd.cff_meta in
 			let req = (match req with None -> if is_static || constr then cl_req else None | _ -> req) in
 			(match req with
@@ -2698,6 +2714,7 @@ let rec init_module_type ctx context_init do_init (decl,p) =
 	in
 	match decl with
 	| EImport (path,mode) ->
+		ctx.m.module_imports <- (path,mode) :: ctx.m.module_imports;
 		let rec loop acc = function
 			| x :: l when is_lower_ident (fst x) -> loop (x::acc) l
 			| rest -> List.rev acc, rest
@@ -2941,7 +2958,7 @@ let rec init_module_type ctx context_init do_init (decl,p) =
 		List.iter (fun c ->
 			let p = c.ec_pos in
 			let params = ref [] in
-			params := List.map (fun tp -> type_type_params ~enum_constructor:true ctx ([],c.ec_name) (fun() -> !params) c.ec_pos tp) c.ec_params;
+			params := type_type_params ~enum_constructor:true ctx ([],c.ec_name) (fun() -> !params) c.ec_pos c.ec_params;
 			let params = !params in
 			let ctx = { ctx with type_params = params @ ctx.type_params } in
 			let rt = (match c.ec_type with
@@ -2986,7 +3003,7 @@ let rec init_module_type ctx context_init do_init (decl,p) =
 					| _ -> Var { v_read = AccNormal; v_write = AccNo }
 				);
 				cf_pos = e.e_pos;
-				cf_doc = None;
+				cf_doc = f.ef_doc;
 				cf_meta = no_meta;
 				cf_expr = None;
 				cf_params = f.ef_params;
@@ -3098,6 +3115,7 @@ let type_module ctx m file ?(is_extern=false) tdecls p =
 			module_using = [];
 			module_globals = PMap.empty;
 			wildcard_packages = [];
+			module_imports = [];
 		};
 		meta = [];
 		this_stack = [];
@@ -3131,13 +3149,13 @@ let type_module ctx m file ?(is_extern=false) tdecls p =
 	List.iter (fun d ->
 		match d with
 		| (TClassDecl c, (EClass d, p)) ->
-			c.cl_params <- List.map (type_type_params ctx c.cl_path (fun() -> c.cl_params) p) d.d_params;
+			c.cl_params <- type_type_params ctx c.cl_path (fun() -> c.cl_params) p d.d_params;
 		| (TEnumDecl e, (EEnum d, p)) ->
-			e.e_params <- List.map (type_type_params ctx e.e_path (fun() -> e.e_params) p) d.d_params;
+			e.e_params <- type_type_params ctx e.e_path (fun() -> e.e_params) p d.d_params;
 		| (TTypeDecl t, (ETypedef d, p)) ->
-			t.t_params <- List.map (type_type_params ctx t.t_path (fun() -> t.t_params) p) d.d_params;
+			t.t_params <- type_type_params ctx t.t_path (fun() -> t.t_params) p d.d_params;
 		| (TAbstractDecl a, (EAbstract d, p)) ->
-			a.a_params <- List.map (type_type_params ctx a.a_path (fun() -> a.a_params) p) d.d_params;
+			a.a_params <- type_type_params ctx a.a_path (fun() -> a.a_params) p d.d_params;
 		| _ ->
 			assert false
 	) decls;

@@ -2471,8 +2471,6 @@ let configure gen =
 
 	TypeParams.RenameTypeParameters.run gen;
 
-	let t = Common.timer "code generation" in
-
 	let parts = Str.split_delim (Str.regexp "[\\/]+") gen.gcon.file in
 	mkdir_recursive "" parts;
 	generate_modules_t gen "java" "src" change_path module_gen out_files;
@@ -2489,9 +2487,7 @@ let configure gen =
 		print_endline cmd;
 		if gen.gcon.run_command cmd <> 0 then failwith "Build failed";
 		Sys.chdir old_dir;
-	end;
-
-	t()
+	end
 
 (* end of configure function *)
 
@@ -2715,6 +2711,7 @@ let convert_param ctx p parent param =
 			tp_name = name;
 			tp_params = [];
 			tp_constraints = List.map (convert_signature ctx p) constraints;
+			tp_meta = [];
 		}
 
 let get_type_path ctx ct = match ct with | CTPath p -> p | _ -> assert false
@@ -2835,12 +2832,14 @@ let convert_java_enum ctx p pe =
 								tp_name = name;
 								tp_params = [];
 								tp_constraints = List.map (convert_signature ctx p) (ext :: impl);
+								tp_meta = [];
 							}
 						| (name, None, impl) ->
 							{
 								tp_name = name;
 								tp_params = [];
 								tp_constraints = List.map (convert_signature ctx p) (impl);
+								tp_meta = [];
 							}
 					) field.jf_types in
 					ctx.jtparams <- old_types;

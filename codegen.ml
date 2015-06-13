@@ -247,6 +247,7 @@ let make_generic ctx ps pt p =
 				| TAbstract(a,tl) -> (s_type_path_underscore a.a_path) ^ (loop_tl tl)
 				| _ when not top -> "_" (* allow unknown/incompatible types as type parameters to retain old behavior *)
 				| TMono _ -> raise (Generic_Exception (("Could not determine type for parameter " ^ s), p))
+				| TDynamic _ -> "Dynamic"
 				| t -> raise (Generic_Exception (("Type parameter must be a class or enum instance (found " ^ (s_type (print_context()) t) ^ ")"), p))
 			and loop_tl tl = match tl with
 				| [] -> ""
@@ -683,6 +684,14 @@ let on_inherit ctx c p h =
 	| _ ->
 		true
 
+let push_this ctx e = match e.eexpr with
+	| TConst ((TInt _ | TFloat _ | TString _ | TBool _) as ct) ->
+		(EConst (tconst_to_const ct),e.epos),fun () -> ()
+	| _ ->
+		ctx.this_stack <- e :: ctx.this_stack;
+		let er = EMeta((Meta.This,[],e.epos), (EConst(Ident "this"),e.epos)),e.epos in
+		er,fun () -> ctx.this_stack <- List.tl ctx.this_stack
+
 (* -------------------------------------------------------------------------- *)
 (* ABSTRACT CASTS *)
 
@@ -691,7 +700,21 @@ module AbstractCast = struct
 	let cast_stack = ref []
 
 	let make_static_call ctx c cf a pl args t p =
-		make_static_call ctx c cf (apply_params a.a_params pl) args t p
+		if cf.cf_kind = Method MethMacro then begin
+			match args with
+				| [e] ->
+					let e,f = push_this ctx e in
+					ctx.with_type_stack <- (WithType t) :: ctx.with_type_stack;
+					let e = match ctx.g.do_macro ctx MExpr c.cl_path cf.cf_name [e] p with
+						| Some e -> type_expr ctx e Value
+						| None ->  type_expr ctx (EConst (Ident "null"),p) Value
+					in
+					ctx.with_type_stack <- List.tl ctx.with_type_stack;
+					f();
+					e
+				| _ -> assert false
+		end else
+			make_static_call ctx c cf (apply_params a.a_params pl) args t p
 
 	let do_check_cast ctx tleft eright p =
 		let recurse cf f =
@@ -751,7 +774,8 @@ module AbstractCast = struct
 
 	let cast_or_unify_raise ctx tleft eright p =
 		try
-			if ctx.com.display <> DMNone then raise Not_found;
+			(* can't do that anymore because this might miss macro calls (#4315) *)
+			(* if ctx.com.display <> DMNone then raise Not_found; *)
 			do_check_cast ctx tleft eright p
 		with Not_found ->
 			unify_raise ctx eright.etype tleft p;
@@ -769,8 +793,6 @@ module AbstractCast = struct
 		let ta = apply_params a.a_params pl a.a_this in
 		let rec loop cfl = match cfl with
 			| [] -> raise Not_found
-			| cf :: cfl when not (Ast.Meta.has Ast.Meta.ArrayAccess cf.cf_meta) ->
-				loop cfl
 			| cf :: cfl ->
 				let monos = List.map (fun _ -> mk_mono()) cf.cf_params in
 				let map t = apply_params a.a_params pl (apply_params cf.cf_params monos t) in
@@ -1487,12 +1509,12 @@ let dump_types com =
 			| Some f -> print_field false f);
 			List.iter (print_field false) c.cl_ordered_fields;
 			List.iter (print_field true) c.cl_ordered_statics;
-            (match c.cl_init with
-            | None -> ()
-            | Some e ->
-                print "\n\n\t__init__ = ";
-                print "%s" (s_expr s_type e);
-                print "}\n");
+			(match c.cl_init with
+			| None -> ()
+			| Some e ->
+				print "\n\n\t__init__ = ";
+				print "%s" (s_expr s_type e);
+				print "}\n");
 			print "}";
 		| Type.TEnumDecl e ->
 			print "%s%senum %s%s {\n" (if e.e_private then "private " else "") (if e.e_extern then "extern " else "") (s_type_path path) (params e.e_params);
@@ -1779,11 +1801,12 @@ module UnificationCallback = struct
 		| _ ->
 			List.map (fun e -> f e t_dynamic) el
 
-	let rec run f e =
+	let rec run ff e =
 		let f e t =
-			(* TODO: I don't think this should cause errors on Flash target *)
-			(* if not (type_iseq e.etype t) then f e t else e *)
-			f e t
+			if not (type_iseq e.etype t) then
+				ff e t
+			else
+				e
 		in
 		let check e = match e.eexpr with
 			| TBinop((OpAssign | OpAssignOp _ as op),e1,e2) ->
@@ -1838,7 +1861,7 @@ module UnificationCallback = struct
 				tf_stack := List.tl !tf_stack;
 				etf
 			| _ ->
-				check (Type.map_expr (run f) e)
+				check (Type.map_expr (run ff) e)
 end;;
 
 module DeprecationCheck = struct
@@ -1956,3 +1979,44 @@ let interpolate_code com code tl f_string f_expr p =
 				err ("Unexpected " ^ x)
 	in
 	loop (Str.full_split regex code)
+
+(* Collection of functions that return expressions *)
+module ExprBuilder = struct
+	let make_static_this c p =
+		let ta = TAnon { a_fields = c.cl_statics; a_status = ref (Statics c) } in
+		mk (TTypeExpr (TClassDecl c)) ta p
+
+	let make_int com i p =
+		mk (TConst (TInt (Int32.of_int i))) com.basic.tint p
+
+	let make_float com f p =
+		mk (TConst (TFloat f)) com.basic.tfloat p
+
+	let make_null t p =
+		mk (TConst TNull) t p
+
+	let make_local v p =
+		mk (TLocal v) v.v_type p
+
+	let make_const_texpr com ct p = match ct with
+		| TString s -> mk (TConst (TString s)) com.basic.tstring p
+		| TInt i -> mk (TConst (TInt i)) com.basic.tint p
+		| TFloat f -> mk (TConst (TFloat f)) com.basic.tfloat p
+		| TBool b -> mk (TConst (TBool b)) com.basic.tbool p
+		| TNull -> mk (TConst TNull) (com.basic.tnull (mk_mono())) p
+		| _ -> error "Unsupported constant" p
+end
+
+(* Static extensions for classes *)
+module ExtClass = struct
+
+	let add_cl_init c e = match c.cl_init with
+			| None -> c.cl_init <- Some e
+			| Some e' -> c.cl_init <- Some (concat e' e)
+
+	let add_static_init c cf e p =
+		let ethis = ExprBuilder.make_static_this c p in
+		let ef1 = mk (TField(ethis,FStatic(c,cf))) cf.cf_type p in
+		let e_assign = mk (TBinop(OpAssign,ef1,e)) e.etype p in
+		add_cl_init c e_assign
+end

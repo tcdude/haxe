@@ -263,6 +263,7 @@ and tabstract = {
 	mutable a_to : t list;
 	mutable a_to_field : (t * tclass_field) list;
 	mutable a_array : tclass_field list;
+	mutable a_resolve : tclass_field option;
 }
 
 and module_type =
@@ -439,6 +440,7 @@ let null_abstract = {
 	a_to = [];
 	a_to_field = [];
 	a_array = [];
+	a_resolve = None;
 }
 
 let add_dependency m mdep =
@@ -674,6 +676,15 @@ let type_of_module_type = function
 	| TEnumDecl e -> TEnum (e,List.map snd e.e_params)
 	| TTypeDecl t -> TType (t,List.map snd t.t_params)
 	| TAbstractDecl a -> TAbstract (a,List.map snd a.a_params)
+
+let tconst_to_const = function
+	| TInt i -> Int (Int32.to_string i)
+	| TFloat s -> Float s
+	| TString s -> String s
+	| TBool b -> Ident (if b then "true" else "false")
+	| TNull -> Ident "null"
+	| TThis -> Ident "this"
+	| TSuper -> Ident "super"
 
 (* ======= Field utility ======= *)
 
@@ -1322,8 +1333,8 @@ let unify_kind k1 k2 =
 			| MethDynamic -> direct_access v.v_read && direct_access v.v_write
 			| MethMacro -> false
 			| MethNormal | MethInline ->
-				match v.v_write with
-				| AccNo | AccNever -> true
+				match v.v_read,v.v_write with
+				| AccNormal,(AccNo | AccNever) -> true
 				| _ -> false)
 		| Method m1, Method m2 ->
 			match m1,m2 with
