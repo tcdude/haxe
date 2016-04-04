@@ -296,7 +296,7 @@ class TestType extends Test {
 
 		// TODO: this fails on flash 9
 		var foo = function(bar = 2) { return bar; };
-		#if flash
+		#if (flash || hl)
 		t(typeError(foo.bind(_)));
 		#else
 		var l = foo.bind(_);
@@ -513,14 +513,21 @@ class TestType extends Test {
 		typedAs(inlineTest2([1]), var void:Void);
 	}
 
-	@:analyzer(no_check_has_effect)
 	inline function inlineTest1<T>(map:Array<T>) {
 		map[0];
 	}
 
-	@:analyzer(no_check_has_effect)
 	inline function inlineTest2(map:Array<Dynamic>) {
 		map[0];
+	}
+
+	public function testMacroFollowWithAbstracts()
+	{
+		#if !macro
+		eq(MyMacro.MyMacroHelper.followWithAbstracts(new Map<String,String>()), "TInst(haxe.ds.StringMap,[TInst(String,[])])");
+		eq(MyMacro.MyMacroHelper.followWithAbstractsOnce({ var x:TypedefToStringMap<String>; x; }), "TAbstract(Map,[TInst(String,[]),TInst(String,[])])");
+		eq(MyMacro.MyMacroHelper.followWithAbstracts(new TypedefToStringMap<String>()), "TInst(haxe.ds.StringMap,[TInst(String,[])])");
+		#end
 	}
 
 	public function testMacroRest() {
@@ -607,7 +614,7 @@ class TestType extends Test {
 		return Std.string(a) + Std.string(b);
 	}
 
-	@:generic static function gf3 < A:{function new(s:String):Void;}, B:Array<A> > (a:A, b:B) {
+	@:generic static function gf3 < A:haxe.Constraints.Constructible<String -> Void>, B:Array<A> > (a:A, b:B) {
 		var clone = new A("foo");
 		b.push(clone);
 		return b;
@@ -666,7 +673,6 @@ class TestType extends Test {
 		eq(c.fProp(9), "test09");
 	}
 
-	@:analyzer(ignore)
 	function testVoidFunc() {
 		exc(function() { throw null; return 1; } );
 		exc(function() { throw null; return "foo"; } );
@@ -876,3 +882,5 @@ class TestType extends Test {
 		typedAs(unit.MyAbstract.GADTEnumAbstract.B, expectedB);
 	}
 }
+
+typedef TypedefToStringMap<T> = Map<String,T>
