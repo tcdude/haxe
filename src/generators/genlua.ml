@@ -137,7 +137,7 @@ let basename path =
 		String.sub path (idx + 1) (String.length path - idx - 1)
 	with Not_found -> path
 
-(* TODO : make this work properly... it was inserting commas where they shouldn't be *)
+(* TODO : is this necessary any more?*)
 let newprop ctx =
 	match Buffer.nth ctx.buf (Buffer.length ctx.buf - 1) with
 	| '{' -> print ctx "\n%s" ctx.tabs
@@ -166,7 +166,7 @@ let fun_block ctx f p =
 
 let open_block ctx =
 	let oldt = ctx.tabs in
-	ctx.tabs <- "\t" ^ ctx.tabs;
+	ctx.tabs <- "  " ^ ctx.tabs;
 	(fun() -> ctx.tabs <- oldt)
 
 let rec iter_switch_break in_switch e =
@@ -177,6 +177,7 @@ let rec iter_switch_break in_switch e =
 	| _ -> iter (iter_switch_break in_switch) e
 
 let handle_break ctx e =
+    (* TODO: This got messy. Find a way to unify the implementation with a try/catch helper at least *)
 	let old = ctx.in_loop, ctx.handle_break in
 	ctx.in_loop <- true;
 	try
@@ -188,7 +189,8 @@ let handle_break ctx e =
 		)
 	with
 		Exit ->
-			spr ctx "try {";
+			sprln ctx "local _hx_expected_result = {}";
+			sprln ctx "local _hx_status, _hx_result = pcall(function() ";
 			let b = open_block ctx in
 			newline ctx;
 			ctx.handle_break <- true;
@@ -197,7 +199,11 @@ let handle_break ctx e =
 				ctx.in_loop <- fst old;
 				ctx.handle_break <- snd old;
 				newline ctx;
-				spr ctx "} catch( e ) { if( e != \"_hx__break__\" ) throw e; }";
+				sprln ctx "end";
+				sprln ctx " return _hx_expected_result end)";
+				spr ctx " if not _hx_status then ";
+				newline ctx;
+				spr ctx " elseif _hx_result ~= _hx_expected_result then return _hx_result";
 			)
 
 let this ctx = match ctx.in_value with None -> "self" | Some _ -> "self"
@@ -393,11 +399,6 @@ let rec gen_call ctx e el in_value =
 			gen_value ctx e;
 			spr ctx ")";
 		end
-	| TCall ({eexpr = TField(e,((FInstance _ | FAnon _) as ef)) }, _), el ->
-		gen_value ctx e;
-		print ctx ":%s(" (field_name ef);
-		concat ctx "," (gen_value ctx) el;
-		spr ctx ")";
 	| TField ( { eexpr = TConst(TInt _ | TFloat _| TString _| TBool _) } as e , ((FInstance _ | FAnon _) as ef)), el ->
 		spr ctx ("(");
 		gen_value ctx e;
@@ -405,12 +406,29 @@ let rec gen_call ctx e el in_value =
 		concat ctx "," (gen_value ctx) el;
 		spr ctx ")";
 	| TField (e, ((FInstance _ | FAnon _ | FDynamic _) as ef)), el ->
-		gen_value ctx e;
-		spr ctx ":";
-		print ctx "%s" (field_name ef);
-		spr ctx "(";
-		concat ctx "," (gen_value ctx) el;
-		spr ctx ")"
+		let s = (field_name ef) in
+		if Hashtbl.mem kwds s || not (valid_lua_ident s) then begin
+		    match e.eexpr with
+		    |TNew _-> (
+			spr ctx "_hx_apply_self(";
+			gen_value ctx e;
+			print ctx ",\"%s\"" (field_name ef);
+			if List.length(el) > 0 then spr ctx ",";
+			concat ctx "," (gen_value ctx) el;
+			spr ctx ")";
+		    );
+		    |_ -> (
+			gen_value ctx e;
+			print ctx "%s(" (anon_field s);
+			concat ctx "," (gen_value ctx) (e::el);
+			spr ctx ")"
+		    )
+		end else begin
+		    gen_value ctx e;
+		    print ctx ":%s(" (field_name ef);
+		    concat ctx "," (gen_value ctx) el;
+		    spr ctx ")"
+		end;
 	| _ ->
 		gen_value ctx e;
 		spr ctx "(";
@@ -654,7 +672,9 @@ and gen_expr ?(local=true) ctx e = begin
 		spr ctx "while ";
 		gen_cond ctx cond;
 		spr ctx " do ";
+		let b = open_block ctx in
 		gen_block_element ctx e;
+		b();
 		handle_break();
 		if has_continue e then begin
 		    newline ctx;
@@ -1307,7 +1327,7 @@ let gen_class_field ctx c f predelimit =
 	if predelimit then sprln ctx ",";
 	match f.cf_expr with
 	| None ->
-		print ctx "'%s', nil" (anon_field f.cf_name);
+		print ctx "'%s', nil" f.cf_name;
 	| Some e ->
 		ctx.id_counter <- 0;
 		(match e.eexpr with
@@ -1315,7 +1335,7 @@ let gen_class_field ctx c f predelimit =
 		    let old = ctx.in_value, ctx.in_loop in
 		    ctx.in_value <- None;
 		    ctx.in_loop <- false;
-		    print ctx "'%s', function" (anon_field f.cf_name);
+		    print ctx "'%s', function" f.cf_name;
 		    print ctx "(%s) " (String.concat "," ("self" :: List.map ident (List.map arg_name f2.tf_args)));
 		    let fblock = fun_block ctx f2 e.epos in
 		    (match fblock.eexpr with
@@ -1704,7 +1724,7 @@ let generate com =
 	List.iter (fun (_,_,e) -> chk_features e) ctx.statics;
 	if has_feature ctx "use._iterator" then begin
 		add_feature ctx "use._hx_bind";
-		println ctx "function _hx_iterator(o) { if ( lua.Boot.__instanceof(o, Array) ) return function() { return HxOverrides.iter(o); }; return typeof(o.iterator) == 'function' ? _hx_bind(o,o.iterator) : o.iterator; }";
+		println ctx "function _hx_iterator(o)  if ( lua.Boot.__instanceof(o, Array) ) then return function() return HxOverrides.iter(o) end elseif (typeof(o.iterator) == 'function') then return  _hx_bind(o,o.iterator) else return  o.iterator end end";
 	end;
 	if has_feature ctx "use._hx_bind" then println ctx "_hx_bind = lua.Boot.bind";
 

@@ -24,7 +24,7 @@ open Common
 exception Internal_match_failure
 
 let s_type = s_type (print_context())
-let s_expr_pretty = s_expr_pretty "" s_type
+let s_expr_pretty = s_expr_pretty false "" s_type
 
 let fake_tuple_type = TInst(mk_class null_module ([],"-Tuple") null_pos, [])
 
@@ -437,21 +437,29 @@ module Case = struct
 			v.v_type <- map v.v_type;
 			(v,t_old) :: acc
 		) ctx.locals [] in
+		let old_ret = ctx.ret in
+		ctx.ret <- map ctx.ret;
 		let pat = Pattern.make ctx (map t) e in
 		unapply_type_parameters ctx.type_params monos;
 		let eg = match eg with
 			| None -> None
 			| Some e -> Some (type_expr ctx e Value)
 		in
-		let eo = match eo with
-			| None ->
-				(match with_type with WithType t -> unify ctx ctx.t.tvoid t (pos e) | _ -> ());
+		let eo = match eo,with_type with
+			| None,WithType t ->
+				unify ctx ctx.t.tvoid t (pos e);
 				None
-			| Some e ->
+			| None,_ ->
+				None
+			| Some e,WithType t ->
+				let e = type_expr ctx e (WithType (map t)) in
+				let e = Codegen.AbstractCast.cast_or_unify ctx (map t) e e.epos in
+				Some e
+			| Some e,_ ->
 				let e = type_expr ctx e with_type in
-				let e = match with_type with WithType t -> Codegen.AbstractCast.cast_or_unify ctx (map t) e e.epos | _ -> e in
 				Some e
 		in
+		ctx.ret <- old_ret;
 		List.iter (fun (v,t) -> v.v_type <- t) old_types;
 		save();
 		{
@@ -488,7 +496,7 @@ module Decision_tree = struct
 
 	let s_case_expr tabs case = match case.case_expr with
 		| None -> ""
-		| Some e -> Type.s_expr_pretty tabs s_type e
+		| Some e -> Type.s_expr_pretty false tabs s_type e
 
 	let rec to_string tabs dt = match dt.dt_t with
 		| Leaf case ->
@@ -499,7 +507,7 @@ module Decision_tree = struct
 			in
 			let s_cases = String.concat "" (List.map s_case cases) in
 			let s_default = to_string (tabs ^ "\t") dt in
-			Printf.sprintf "switch (%s) {%s\n%s\tdefault: %s\n%s}" (Type.s_expr_pretty tabs s_type e) s_cases tabs s_default tabs
+			Printf.sprintf "switch (%s) {%s\n%s\tdefault: %s\n%s}" (Type.s_expr_pretty false tabs s_type e) s_cases tabs s_default tabs
 		| Bind(bl,dt) ->
 			(String.concat "" (List.map (fun (v,_,e) -> if v.v_name = "_" then "" else Printf.sprintf "%s<%i> = %s; " v.v_name v.v_id (s_expr_pretty e)) bl)) ^
 			to_string tabs dt
@@ -858,8 +866,8 @@ module Compile = struct
 	let s_case (case,bindings,patterns) =
 		let s_bindings = String.concat ", " (List.map (fun (v,_,e) -> Printf.sprintf "%s<%i> = %s" v.v_name v.v_id (s_expr_pretty e)) bindings) in
 		let s_patterns = String.concat " " (List.map Pattern.to_string patterns) in
-		let s_expr = match case.case_expr with None -> "" | Some e -> Type.s_expr_pretty "\t\t" s_type e in
-		let s_guard = match case.case_guard with None -> "" | Some e -> Type.s_expr_pretty "\t\t" s_type e in
+		let s_expr = match case.case_expr with None -> "" | Some e -> Type.s_expr_pretty false "\t\t" s_type e in
+		let s_guard = match case.case_guard with None -> "" | Some e -> Type.s_expr_pretty false "\t\t" s_type e in
 		Printf.sprintf "\n\t\tbindings: %s\n\t\tpatterns: %s\n\t\tguard: %s\n\t\texpr: %s" s_bindings s_patterns s_guard s_expr
 
 	let s_cases cases =
