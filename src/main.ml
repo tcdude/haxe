@@ -162,6 +162,7 @@ let htmlescape s =
 	let s = String.concat "&amp;" (ExtString.String.nsplit s "&") in
 	let s = String.concat "&lt;" (ExtString.String.nsplit s "<") in
 	let s = String.concat "&gt;" (ExtString.String.nsplit s ">") in
+	let s = String.concat "&quot;" (ExtString.String.nsplit s "\"") in
 	s
 
 let reserved_flags = [
@@ -845,27 +846,26 @@ and wait_loop boot_com host port =
 		if verbose then print_endline "Client connected";
 		let b = Buffer.create 0 in
 		let rec read_loop count =
-			let r = try
-				Unix.recv sin tmp 0 bufsize []
-			with Unix.Unix_error((Unix.EWOULDBLOCK|Unix.EAGAIN),_,_) ->
-				0
-			in
-			if verbose then begin
-				if r > 0 then Printf.printf "Reading %d bytes\n" r else print_endline "Waiting for data...";
-			end;
-			Buffer.add_substring b tmp 0 r;
-			if r > 0 && tmp.[r-1] = '\000' then
-				Buffer.sub b 0 (Buffer.length b - 1)
-			else begin
-				if r = 0 then begin
-					ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
-					if count = 100 then
-						failwith "Aborting inactive connection"
+			try
+				let r = Unix.recv sin tmp 0 bufsize [] in
+				if r = 0 then
+					failwith "Incomplete request"
+				else begin
+					if verbose then Printf.printf "Reading %d bytes\n" r;
+					Buffer.add_substring b tmp 0 r;
+					if tmp.[r-1] = '\000' then
+						Buffer.sub b 0 (Buffer.length b - 1)
 					else
-						read_loop (count + 1);
-				end else
-					read_loop 0;
-			end;
+						read_loop 0
+				end
+			with Unix.Unix_error((Unix.EWOULDBLOCK|Unix.EAGAIN),_,_) ->
+				if count = 100 then
+					failwith "Aborting inactive connection"
+				else begin
+					if verbose then print_endline "Waiting for data...";
+					ignore(Unix.select [] [] [] 0.05); (* wait a bit *)
+					read_loop (count + 1);
+				end
 		in
 		let rec cache_context com =
 			if com.display = DMNone then begin
@@ -951,6 +951,7 @@ and wait_loop boot_com host port =
 			let estr = Printexc.to_string e in
 			if verbose then print_endline ("Uncaught Error : " ^ estr);
 			(try ssend sin estr with _ -> ());
+			if is_debug_run() then print_endline (Printexc.get_backtrace());
 		);
 		Unix.close sin;
 		current_stdin := None;
@@ -1259,37 +1260,33 @@ try
 				let file, pos = try ExtString.String.split file_pos "@" with _ -> failwith ("Invalid format : " ^ file_pos) in
 				let file = unquote file in
 				let pos, smode = try ExtString.String.split pos "@" with _ -> pos,"" in
-				let activate_special_display_mode () =
-					Common.define com Define.NoCOpt;
-					Parser.use_parser_resume := false
-				in
 				let mode = match smode with
 					| "position" ->
-						activate_special_display_mode();
+						Common.define com Define.NoCOpt;
 						DMPosition
 					| "usage" ->
-						activate_special_display_mode();
+						Common.define com Define.NoCOpt;
 						DMUsage
 					| "type" ->
-						activate_special_display_mode();
+						Common.define com Define.NoCOpt;
 						DMType
 					| "toplevel" ->
-						activate_special_display_mode();
-						DMToplevel
-					| "document-symbols" ->
 						Common.define com Define.NoCOpt;
-						DMDocumentSymbols;
+						DMToplevel
+					| "module-symbols" ->
+						Common.define com Define.NoCOpt;
+						DMModuleSymbols;
+					| "diagnostics" ->
+						Common.define com Define.NoCOpt;
+						DMDiagnostics;
 					| "" ->
-						Parser.use_parser_resume := true;
 						DMDefault
 					| _ ->
 						let smode,arg = try ExtString.String.split smode "@" with _ -> pos,"" in
 						match smode with
 							| "resolve" ->
-								activate_special_display_mode();
 								DMResolve arg
 							| _ ->
-								Parser.use_parser_resume := true;
 								DMDefault
 				in
 				let pos = try int_of_string pos with _ -> failwith ("Invalid format : "  ^ pos) in
@@ -1415,7 +1412,7 @@ try
 			classes := (path,name) :: !classes
 		else begin
 			force_typing := true;
-			config_macros := (Printf.sprintf "include('%s')" cl) :: !config_macros;
+			config_macros := (Printf.sprintf "include('%s', true, null, null, true)" cl) :: !config_macros;
 		end
 	in
 	let all_args_spec = basic_args_spec @ adv_args_spec in
@@ -1572,7 +1569,7 @@ try
 		Typer.finalize tctx;
 		t();
 		if ctx.has_error then raise Abort;
-		begin match com.display with
+		begin match ctx.com.display with
 			| DMNone | DMUsage ->
 				()
 			| _ ->
@@ -1714,12 +1711,25 @@ with
 			fields
 		in
 		complete_fields com fields
-	| Display.DisplayTypes tl ->
+	| Display.DisplayType (t,p) ->
 		let ctx = print_context() in
 		let b = Buffer.create 0 in
-		List.iter (fun t ->
+		if p = null_pos then
+			Buffer.add_string b "<type>\n"
+		else begin
+			let error_printer file line = sprintf "%s:%d:" (Common.unique_full_path file) line in
+			let epos = Lexer.get_error_pos error_printer p in
+			Buffer.add_string b ("<type p=\"" ^ (htmlescape epos) ^ "\">\n")
+		end;
+		Buffer.add_string b (htmlescape (s_type ctx t));
+		Buffer.add_string b "\n</type>\n";
+		raise (Completion (Buffer.contents b))
+	| Display.DisplaySignatures tl ->
+		let ctx = print_context() in
+		let b = Buffer.create 0 in
+		List.iter (fun (t,doc) ->
 			Buffer.add_string b "<type>\n";
-			Buffer.add_string b (htmlescape (s_type ctx t));
+			Buffer.add_string b (htmlescape (s_type ctx (follow t)));
 			Buffer.add_string b "\n</type>\n";
 		) tl;
 		raise (Completion (Buffer.contents b))
@@ -1740,14 +1750,23 @@ with
 		Buffer.add_string b "<il>\n";
 		let ctx = print_context() in
 		let s_type t = htmlescape (s_type ctx t) in
+		let s_doc d = Option.map_default (fun s -> Printf.sprintf " d=\"%s\"" (htmlescape s)) "" d in
 		List.iter (fun id -> match id with
-			| Display.ITLocal v -> Buffer.add_string b (Printf.sprintf "<i k=\"local\" t=\"%s\">%s</i>\n" (s_type v.v_type) v.v_name);
-			| Display.ITMember(c,cf) -> Buffer.add_string b (Printf.sprintf "<i k=\"member\" t=\"%s\">%s</i>\n" (s_type cf.cf_type) cf.cf_name);
-			| Display.ITStatic(c,cf) -> Buffer.add_string b (Printf.sprintf "<i k=\"static\" t=\"%s\">%s</i>\n" (s_type cf.cf_type) cf.cf_name);
-			| Display.ITEnum(en,ef) -> Buffer.add_string b (Printf.sprintf "<i k=\"enum\" t=\"%s\">%s</i>\n" (s_type ef.ef_type) ef.ef_name);
-			| Display.ITGlobal(mt,s,t) -> Buffer.add_string b (Printf.sprintf "<i k=\"global\" p=\"%s\" t=\"%s\">%s</i>\n" (s_type_path (t_infos mt).mt_path) (s_type t) s);
-			| Display.ITType(mt) -> Buffer.add_string b (Printf.sprintf "<i k=\"type\" p=\"%s\">%s</i>\n" (s_type_path (t_infos mt).mt_path) (snd (t_infos mt).mt_path));
-			| Display.ITPackage s -> Buffer.add_string b (Printf.sprintf "<i k=\"package\">%s</i>\n" s)
+			| Display.ITLocal v ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"local\" t=\"%s\">%s</i>\n" (s_type v.v_type) v.v_name);
+			| Display.ITMember(c,cf) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"member\" t=\"%s\"%s>%s</i>\n" (s_type cf.cf_type) (s_doc cf.cf_doc) cf.cf_name);
+			| Display.ITStatic(c,cf) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"static\" t=\"%s\"%s>%s</i>\n" (s_type cf.cf_type) (s_doc cf.cf_doc) cf.cf_name);
+			| Display.ITEnum(en,ef) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"enum\" t=\"%s\"%s>%s</i>\n" (s_type ef.ef_type) (s_doc ef.ef_doc) ef.ef_name);
+			| Display.ITGlobal(mt,s,t) ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"global\" p=\"%s\" t=\"%s\">%s</i>\n" (s_type_path (t_infos mt).mt_path) (s_type t) s);
+			| Display.ITType(mt) ->
+				let infos = t_infos mt in
+				Buffer.add_string b (Printf.sprintf "<i k=\"type\" p=\"%s\"%s>%s</i>\n" (s_type_path infos.mt_path) (s_doc infos.mt_doc) (snd infos.mt_path));
+			| Display.ITPackage s ->
+				Buffer.add_string b (Printf.sprintf "<i k=\"package\">%s</i>\n" s)
 		) il;
 		Buffer.add_string b "</il>";
 		raise (Completion (Buffer.contents b))
@@ -1810,7 +1829,7 @@ with
 				raise (Completion c)
 			| _ ->
 				error ctx ("Could not load module " ^ (Ast.s_type_path (p,c))) Ast.null_pos)
-	| Display.DocumentSymbols s ->
+	| Display.ModuleSymbols s | Display.Diagnostics s ->
 		raise (Completion s)
 	| Interp.Sys_exit i ->
 		ctx.flush();

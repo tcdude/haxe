@@ -156,6 +156,7 @@ module Meta = struct
 		| Rtti
 		| Runtime
 		| RuntimeValue
+		| Scalar
 		| SelfCall
 		| Setter
 		| SkipCtor
@@ -174,6 +175,7 @@ module Meta = struct
 		| To
 		| ToString
 		| Transient
+		| TemplatedCall
 		| ValueUsed
 		| Volatile
 		| Unbound
@@ -455,7 +457,7 @@ type import_mode =
 	| IAsName of string
 	| IAll
 
-type import = (string * pos) list * import_mode
+type import = placed_name list * import_mode
 
 type type_def =
 	| EClass of (class_flag, class_field list) definition
@@ -463,7 +465,7 @@ type type_def =
 	| ETypedef of (enum_flag, type_hint) definition
 	| EAbstract of (abstract_flag, class_field list) definition
 	| EImport of import
-	| EUsing of placed_type_path
+	| EUsing of placed_name list
 
 type type_decl = type_def * pos
 
@@ -834,7 +836,8 @@ let s_expr e =
 		| ETernary (e1,e2,e3) -> s_expr_inner tabs e1 ^ " ? " ^ s_expr_inner tabs e2 ^ " : " ^ s_expr_inner tabs e3
 		| ECheckType (e,(t,_)) -> "(" ^ s_expr_inner tabs e ^ " : " ^ s_complex_type tabs t ^ ")"
 		| EMeta (m,e) -> s_metadata tabs m ^ " " ^ s_expr_inner tabs e
-		| _ -> ""
+		| EDisplay (e1,_) -> Printf.sprintf "#DISPLAY(%s)" (s_expr_inner tabs e1)
+		| EDisplayNew tp -> Printf.sprintf "#DISPLAY_NEW(%s)" (s_complex_type_path tabs tp)
 	and s_expr_list tabs el sep =
 		(String.concat sep (List.map (s_expr_inner tabs) el))
 	and s_complex_type_path tabs (t,_) =
