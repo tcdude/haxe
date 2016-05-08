@@ -1,6 +1,7 @@
 open Ast
 open Common
 open Type
+open Typecore
 
 (* order of these variants affects output sorting *)
 type display_field_kind =
@@ -9,15 +10,6 @@ type display_field_kind =
 	| FKType
 	| FKPackage
 
-type identifier_type =
-	| ITLocal of tvar
-	| ITMember of tclass * tclass_field
-	| ITStatic of tclass * tclass_field
-	| ITEnum of tenum * tenum_field
-	| ITGlobal of module_type * string * t
-	| ITType of module_type
-	| ITPackage of string
-
 exception Diagnostics of string
 exception ModuleSymbols of string
 exception DisplaySignatures of (t * documentation) list
@@ -25,7 +17,7 @@ exception DisplayType of t * pos
 exception DisplayPosition of Ast.pos list
 exception DisplaySubExpression of Ast.expr
 exception DisplayFields of (string * t * display_field_kind option * documentation) list
-exception DisplayToplevel of identifier_type list
+exception DisplayToplevel of IdentifierType.t list
 
 let is_display_file file =
 	file <> "?" && Common.unique_full_path file = (!Parser.resume_display).pfile
@@ -338,35 +330,89 @@ let process_expr com e = match com.display with
 	| _ -> e
 
 let add_import_position com p =
-	com.shared.display_information.import_positions <- PMap.add p (ref false) com.shared.display_information.import_positions
+	com.shared.shared_display_information.import_positions <- PMap.add p (ref false) com.shared.shared_display_information.import_positions
 
 let mark_import_position com p =
 	try
-		let r = PMap.find p com.shared.display_information.import_positions in
+		let r = PMap.find p com.shared.shared_display_information.import_positions in
 		r := true
 	with Not_found ->
 		()
 
-module DiagnosticsKind = struct
-	type t =
-		| DKUnusedImport
-
-	let to_int = function
-		| DKUnusedImport -> 0
-end
-
 module Diagnostics = struct
-	open DiagnosticsKind
+	module DiagnosticsKind = struct
+		type t =
+			| DKUnusedImport
+			| DKUnresolvedIdentifier
+			| DKCompilerError
+
+		let to_int = function
+			| DKUnusedImport -> 0
+			| DKUnresolvedIdentifier -> 1
+			| DKCompilerError -> 2
+	end
 
 	type t = DiagnosticsKind.t * pos
 
+	module UnresolvedIdentifierSuggestion = struct
+		type t =
+			| UISImport
+			| UISTypo
+
+		let to_int = function
+			| UISImport -> 0
+			| UISTypo -> 1
+	end
+
+	open UnresolvedIdentifierSuggestion
+	open DiagnosticsKind
+
 	let print_diagnostics com =
 		let diag = DynArray.create() in
+		let add dk p sev args =
+			DynArray.add diag (dk,p,sev,args)
+		in
+		begin match !(Common.global_cache) with
+			| None ->
+				()
+			| Some cache ->
+				let find_type i =
+					let types = ref [] in
+					Hashtbl.iter (fun _ m ->
+						List.iter (fun mt ->
+							let tinfos = t_infos mt in
+							if snd tinfos.mt_path = i then
+								types := JObject [
+									"kind",JInt (UnresolvedIdentifierSuggestion.to_int UISImport);
+									"name",JString (s_type_path m.m_path)
+								] :: !types
+						) m.m_types;
+					) cache.c_modules;
+					!types
+				in
+			List.iter (fun (s,p,suggestions) ->
+				let suggestions = List.map (fun (s,_) ->
+					JObject [
+						"kind",JInt (UnresolvedIdentifierSuggestion.to_int UISTypo);
+						"name",JString s
+					]
+				) suggestions in
+				add DKUnresolvedIdentifier p DiagnosticsSeverity.Error (suggestions @ (find_type s));
+			) com.display_information.unresolved_identifiers;
+		end;
 		PMap.iter (fun p r ->
-			if not !r then DynArray.add diag (DKUnusedImport,p)
-		) com.shared.display_information.import_positions;
-		let jl = DynArray.fold_left (fun acc (dk,p) ->
-			(JObject ["kind",JInt (to_int dk);"range",pos_to_json_range p]) :: acc
+			if not !r then add DKUnusedImport p DiagnosticsSeverity.Warning []
+		) com.shared.shared_display_information.import_positions;
+		List.iter (fun (s,p,sev) ->
+			add DKCompilerError p sev [JString s]
+		) com.shared.shared_display_information.diagnostics_messages;
+		let jl = DynArray.fold_left (fun acc (dk,p,sev,args) ->
+			(JObject [
+				"kind",JInt (to_int dk);
+				"severity",JInt (DiagnosticsSeverity.to_int sev);
+				"range",pos_to_json_range p;
+				"args",JArray args
+			]) :: acc
 		) [] diag in
 		let js = JArray jl in
 		let b = Buffer.create 0 in

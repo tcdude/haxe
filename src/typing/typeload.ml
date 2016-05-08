@@ -445,7 +445,7 @@ let rec load_instance ?(allow_display=false) ctx (t,pn) allow_no_params p =
 			| [TPType t] -> TDynamic (load_complex_type ctx false p t)
 			| _ -> error "Too many parameters for Dynamic" p
 		else begin
-			if not is_rest && List.length types <> List.length t.tparams then error ("Invalid number of type parameters for " ^ s_type_path path) p;
+			if not is_rest && ctx.com.display = DMNone && List.length types <> List.length t.tparams then error ("Invalid number of type parameters for " ^ s_type_path path) p;
 			let tparams = List.map (fun t ->
 				match t with
 				| TPExpr e ->
@@ -493,6 +493,8 @@ let rec load_instance ?(allow_display=false) ctx (t,pn) allow_no_params p =
 					[]
 				| [],["Rest",_] when is_generic_build ->
 					[]
+				| [],(_,t) :: tl when ctx.com.display <> DMNone ->
+					t :: loop [] tl is_rest
 				| [],_ ->
 					error ("Not enough type parameters for " ^ s_type_path path) p
 				| t :: tl,[] ->
@@ -2215,18 +2217,23 @@ module ClassInitializer = struct
 						(* disallow initialization of non-physical fields (issue #1958) *)
 						display_error ctx "This field cannot be initialized because it is not a real variable" p; e
 					| Var v when not fctx.is_static ->
-						let e = match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
-							| Some e -> e
-							| None ->
-								let rec has_this e = match e.eexpr with
-									| TConst TThis ->
-										display_error ctx "Cannot access this or other member field in variable initialization" e.epos;
-									| TLocal v when (match ctx.vthis with Some v2 -> v == v2 | None -> false) ->
-										display_error ctx "Cannot access this or other member field in variable initialization" e.epos;
-									| _ ->
-									Type.iter has_this e
-								in
-								has_this e;
+						let e = match ctx.com.display with
+							| DMNone ->
+								begin match Optimizer.make_constant_expression ctx (maybe_run_analyzer e) with
+									| Some e -> e
+									| None ->
+										let rec has_this e = match e.eexpr with
+											| TConst TThis ->
+												display_error ctx "Cannot access this or other member field in variable initialization" e.epos;
+											| TLocal v when (match ctx.vthis with Some v2 -> v == v2 | None -> false) ->
+												display_error ctx "Cannot access this or other member field in variable initialization" e.epos;
+											| _ ->
+											Type.iter has_this e
+										in
+										has_this e;
+										e
+								end
+							| _ ->
 								e
 						in
 						e
@@ -3479,6 +3486,7 @@ let type_module ctx mpath file ?(is_extern=false) tdecls p =
 	if is_extern then m.m_extra.m_kind <- MExtern;
 	begin if ctx.is_display_file then match ctx.com.display with
 		| DMDiagnostics ->
+			flush_pass ctx PBuildClass "diagnostics";
 			List.iter (fun mt -> match mt with
 				| TClassDecl c | TAbstractDecl({a_impl = Some c}) ->
 					ignore(c.cl_build());

@@ -107,13 +107,51 @@ type compiler_callback = {
 	mutable after_generation : (unit -> unit) list;
 }
 
-type display_information = {
+module IdentifierType = struct
+	type t =
+		| ITLocal of tvar
+		| ITMember of tclass * tclass_field
+		| ITStatic of tclass * tclass_field
+		| ITEnum of tenum * tenum_field
+		| ITGlobal of module_type * string * Type.t
+		| ITType of module_type
+		| ITPackage of string
+
+	let get_name = function
+		| ITLocal v -> v.v_name
+		| ITMember(_,cf) | ITStatic(_,cf) -> cf.cf_name
+		| ITEnum(_,ef) -> ef.ef_name
+		| ITGlobal(_,s,_) -> s
+		| ITType mt -> snd (t_infos mt).mt_path
+		| ITPackage s -> s
+end
+
+module DiagnosticsSeverity = struct
+	type t =
+		| Error
+		| Warning
+		| Information
+		| Hint
+
+	let to_int = function
+		| Error -> 1
+		| Warning -> 2
+		| Information -> 3
+		| Hint -> 4
+end
+
+type shared_display_information = {
 	mutable import_positions : (pos,bool ref) PMap.t;
+	mutable diagnostics_messages : (string * pos * DiagnosticsSeverity.t) list;
+}
+
+type display_information = {
+	mutable unresolved_identifiers : (string * pos * (string * IdentifierType.t) list) list;
 }
 
 (* This information is shared between normal and macro context. *)
 type shared_context = {
-	display_information : display_information;
+	shared_display_information : shared_display_information;
 }
 
 type context = {
@@ -121,6 +159,7 @@ type context = {
 	version : int;
 	args : string list;
 	shared : shared_context;
+	display_information : display_information;
 	mutable sys_args : string list;
 	mutable display : display_mode;
 	mutable debug : bool;
@@ -143,6 +182,7 @@ type context = {
 	mutable run_command : string -> int;
 	file_lookup_cache : (string,string option) Hashtbl.t;
 	parser_cache : (string,(type_def * pos) list) Hashtbl.t;
+	cached_macros : (path * string,((string * bool * t) list * t * tclass * Type.tclass_field)) Hashtbl.t;
 	mutable stored_typed_exprs : (int, texpr) PMap.t;
 	(* output *)
 	mutable file : string;
@@ -172,6 +212,14 @@ type context = {
 exception Abort of string * Ast.pos
 
 let display_default = ref DMNone
+
+type cache = {
+	mutable c_haxelib : (string list, string list) Hashtbl.t;
+	mutable c_files : (string, float * Ast.package) Hashtbl.t;
+	mutable c_modules : (path * string, module_def) Hashtbl.t;
+}
+
+let global_cache : cache option ref = ref None
 
 module Define = struct
 
@@ -680,9 +728,13 @@ let create version s_version args =
 		version = version;
 		args = args;
 		shared = {
-			display_information = {
+			shared_display_information = {
 				import_positions = PMap.empty;
+				diagnostics_messages = [];
 			}
+		};
+		display_information = {
+			unresolved_identifiers = [];
 		};
 		sys_args = args;
 		debug = false;
@@ -738,6 +790,7 @@ let create version s_version args =
 		};
 		file_lookup_cache = Hashtbl.create 0;
 		stored_typed_exprs = PMap.empty;
+		cached_macros = Hashtbl.create 0;
 		memory_marker = memory_marker;
 		parser_cache = Hashtbl.create 0;
 	}
@@ -1087,3 +1140,8 @@ let float_repres f =
 			if f = float_of_string s2 then s2 else
 			Printf.sprintf "%.18g" f
 		in valid_float_lexeme float_val
+
+
+let add_diagnostics_message com s p sev =
+	let di = com.shared.shared_display_information in
+	di.diagnostics_messages <- (s,p,sev) :: di.diagnostics_messages
