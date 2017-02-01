@@ -24,7 +24,7 @@ EXTENSION=
 OCAMLOPT?=ocamlopt
 OCAMLC?=ocamlc
 LFLAGS=
-STATICLINK?=0
+STATICLINK?=1
 
 CFLAGS= -bin-annot
 ALL_CFLAGS= $(CFLAGS) -g -w -3 -I libs/extlib -I libs/extc -I libs/neko -I libs/javalib -I libs/ziplib -I libs/swflib -I libs/xml-light -I libs/ttflib -I libs/ilib -I libs/objsize -I libs/pcre \
