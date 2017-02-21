@@ -79,7 +79,7 @@ install_osx: &install_osx
   - mysql -u root -e "grant all on haxe_test.* to travis@localhost;"
   # Build haxe
   - make package_src -s
-  - make "LIB_PARAMS=-cclib $APPLE_ROOT/usr/local/lib/libpcre.a -cclib -lz" -s
+  - make "LIB_PARAMS=-cclib $APPLE_ROOT/usr/local/lib/libpcre.a -cclib -lz"
   - make package_bin -s
   - ls -l out
   - export PATH="$PATH:$TRAVIS_BUILD_DIR"

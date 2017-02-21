@@ -34,14 +34,7 @@ LIBS=unix str libs/extlib/extLib libs/xml-light/xml-light libs/swflib/swflib \
 	libs/extc/extc libs/neko/neko libs/javalib/java libs/ziplib/zip \
 	libs/ttflib/ttf libs/ilib/il libs/objsize/objsize libs/pcre/pcre
 
-
-ifneq ($(STATICLINK),0)
-LIB_PARAMS= -cclib '-Wl,-Bstatic -lpcre -lz -Wl,-Bdynamic '
-
-else
-LIB_PARAMS?= -cclib -lpcre -cclib -lz
-
-endif
+LIB_PARAMS=-cclib $APPLE_ROOT/usr/local/lib/libpcre.a -cclib -lz
 
 NATIVE_LIBS=-cclib libs/extc/extc_stubs.o -cclib libs/extc/process_stubs.o -cclib libs/objsize/c_objsize.o -cclib libs/pcre/pcre_stubs.o -ccopt -L/usr/local/lib $(LIB_PARAMS)
 
