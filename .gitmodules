@@ -1,8 +1,8 @@
 [submodule "libs"]
 	path = libs
-	url = ../ocamllibs
+	url = https://github.com/Kode/ocamllibs.git
 	branch = master
 [submodule "extra/haxelib_src"]
 	path = extra/haxelib_src
-	url = ../haxelib
+	url = https://github.com/Kode/haxelib.git
 	branch = master
