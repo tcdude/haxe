@@ -522,11 +522,11 @@ try
 			Common.define com Define.Cppia;
 		),"<file>","generate Cppia code into target file");
 		("Target",["--cs"],["-cs"],Arg.String (fun dir ->
-			cp_libs := "hxcs" :: !cp_libs;
+			(*cp_libs := "hxcs" :: !cp_libs;*)
 			Initialize.set_platform com Cs dir;
 		),"<directory>","generate C# code into target directory");
 		("Target",["--java"],["-java"],Arg.String (fun dir ->
-			cp_libs := "hxjava" :: !cp_libs;
+			(*cp_libs := "hxjava" :: !cp_libs;*)
 			Initialize.set_platform com Java dir;
 		),"<directory>","generate Java code into target directory");
 		("Target",["--python"],["-python"],Arg.String (fun dir ->
