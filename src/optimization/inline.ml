@@ -47,7 +47,7 @@ let api_inline2 com c field params p =
 			None)
 	| ([],"Std"),"string",[{ eexpr = TIf (_,{ eexpr = TConst (TString _)},Some { eexpr = TConst (TString _) }) } as e] ->
 		Some e
-	| ([],"Std"),"string",[{ eexpr = TLocal v | TField({ eexpr = TLocal v },_) } as ev] when (com.platform = Js || com.platform = Flash) && not (Meta.has Meta.CompilerGenerated v.v_meta) ->
+	| ([],"Std"),"string",[{ eexpr = TLocal v | TField({ eexpr = TLocal v },_) } as ev] when (com.platform = Js || com.platform = Flash) && (match v.v_kind with VUser _ -> true | _ -> false) ->
 		let pos = ev.epos in
 		let stringv() =
 			let to_str = mk (TBinop (Ast.OpAdd, mk (TConst (TString "")) com.basic.tstring pos, ev)) com.basic.tstring pos in
@@ -112,14 +112,14 @@ let api_inline ctx c field params p = match c.cl_path, field, params with
 		let tbool = ctx.com.basic.tbool in
 		let tint = ctx.com.basic.tint in
 
-		let esyntax =
-			let m = Hashtbl.find ctx.g.modules (["js"],"Syntax") in
+		let esyntax () =
+			let m = (try Hashtbl.find ctx.g.modules (["js"],"Syntax") with Not_found -> assert false) in
+			add_dependency ctx.m.curmod m;
 			ExtList.List.find_map (function
 				| TClassDecl ({ cl_path = ["js"],"Syntax" } as cl) -> Some (make_static_this cl p)
 				| _ -> None
 			) m.m_types
 		in
-
 		let is_trivial e =
 			match e.eexpr with
 			| TConst _ | TLocal _ -> true
@@ -127,7 +127,7 @@ let api_inline ctx c field params p = match c.cl_path, field, params with
 		in
 
 		let typeof t =
-			let tof = Texpr.Builder.fcall esyntax "typeof" [o] tstring p in
+			let tof = Texpr.Builder.fcall (esyntax()) "typeof" [o] tstring p in
 			mk (TBinop (Ast.OpEq, tof, (mk (TConst (TString t)) tstring p))) tbool p
 		in
 
@@ -139,17 +139,17 @@ let api_inline ctx c field params p = match c.cl_path, field, params with
 		| TTypeExpr (TAbstractDecl ({ a_path = [],"Int" })) when is_trivial o ->
 			(* generate typeof(o) == "number" && (o|0) === o check *)
 			let lhs = mk (TBinop (Ast.OpOr, o, mk (TConst (TInt Int32.zero)) tint p)) tint p in
-			let jscheck = Texpr.Builder.fcall esyntax "strictEq" [lhs;o] tbool p in
+			let jscheck = Texpr.Builder.fcall (esyntax()) "strictEq" [lhs;o] tbool p in
 			Some(mk (TBinop (Ast.OpBoolAnd, typeof "number", jscheck)) tbool p)
 		| TTypeExpr (TClassDecl ({ cl_path = [],"Array" })) ->
 			(* generate (o instanceof Array) && o.__enum__ == null check *)
-			let iof = Texpr.Builder.fcall esyntax "instanceof" [o;t] tbool p in
+			let iof = Texpr.Builder.fcall (esyntax()) "instanceof" [o;t] tbool p in
 			let enum = mk (TField (o, FDynamic "__enum__")) (mk_mono()) p in
 			let null = mk (TConst TNull) (mk_mono()) p in
 			let not_enum = mk (TBinop (Ast.OpEq, enum, null)) tbool p in
 			Some (mk (TBinop (Ast.OpBoolAnd, iof, not_enum)) tbool p)
 		| TTypeExpr (TClassDecl cls) when not cls.cl_interface ->
-			Some (Texpr.Builder.fcall esyntax "instanceof" [o;t] tbool p)
+			Some (Texpr.Builder.fcall (esyntax()) "instanceof" [o;t] tbool p)
 		| _ ->
 			None)
 	| (["cs" | "java"],"Lib"),("nativeArray"),[{ eexpr = TArrayDecl args } as edecl; _]
@@ -258,7 +258,7 @@ class inline_state ctx ethis params cf f p = object(self)
 		try
 			Hashtbl.find locals v.v_id
 		with Not_found ->
-			let v' = alloc_var v.v_name v.v_type v.v_pos in
+			let v' = alloc_var (match v.v_kind with VUser _ -> VInlined | k -> k) v.v_name v.v_type v.v_pos in
 			v'.v_extra <- v.v_extra;
 			let i = {
 				i_var = v;
@@ -316,9 +316,10 @@ class inline_state ctx ethis params cf f p = object(self)
 			in
 			try loop e; true with Exit -> false
 		in
-		let is_writable e =
+		let rec is_writable e =
 			match e.eexpr with
 			| TField _ | TEnumParameter _ | TLocal _ | TArray _ -> true
+			| TCast(e1,None) -> is_writable e1
 			| _  -> false
 		in
 		let vars = List.fold_left (fun acc (i,e) ->
@@ -329,7 +330,7 @@ class inline_state ctx ethis params cf f p = object(self)
 			let reject () =
 				(* mark the replacement local for the analyzer *)
 				if (i.i_read + i.i_called) <= 1 && not i.i_write then
-					i.i_subst.v_meta <- (Meta.CompilerGenerated,[],p) :: i.i_subst.v_meta;
+					i.i_subst.v_kind <- VGenerated;
 				(i.i_subst,Some e) :: acc
 			in
 			if i.i_abstract_this && i.i_write then begin
@@ -344,7 +345,7 @@ class inline_state ctx ethis params cf f p = object(self)
 						if not i.i_write then VIInline else VIDoNotInline
 					| TFunction _ ->
 						if i.i_write then error "Cannot modify a closure parameter inside inline method" p;
-						if (i.i_read + i.i_called) <= 1 then VIInline else VIInlineIfCalled
+						if i.i_read <= 1 then VIInline else VIInlineIfCalled
 					| _ ->
 						if not i.i_write && (i.i_read + i.i_called) <= 1 then VIInline else VIDoNotInline
 				in
@@ -385,7 +386,7 @@ class inline_state ctx ethis params cf f p = object(self)
 				let dynamic_e = follow e.etype == t_dynamic in
 				let e = if dynamic_v <> dynamic_e then mk (TCast(e,None)) v.v_type e.epos else e in
 				let e = match e.eexpr, opt with
-					| TConst TNull , Some c -> mk (TConst c) v.v_type e.epos
+					| TConst TNull , Some c -> c
 					| _ -> e
 				in
 				if has_side_effect e then begin
@@ -397,14 +398,17 @@ class inline_state ctx ethis params cf f p = object(self)
 				loop ((l,e) :: acc) pl al false
 			| [], (v,opt) :: al ->
 				let l = self#declare v in
-				let e = mk (TConst (match opt with None -> TNull | Some c -> c)) v.v_type p in
+				let e = match opt with
+					| None -> mk (TConst TNull) v.v_type v.v_pos
+					| Some e -> e
+				in
 				loop ((l,e) :: acc) [] al false
 		in
 		(*
 			Build the expr/var subst list
 		*)
 		let ethis = (match ethis.eexpr with TConst TSuper -> { ethis with eexpr = TConst TThis } | _ -> ethis) in
-		let vthis = alloc_var "_this" ethis.etype ethis.epos in
+		let vthis = alloc_var VInlined "_this" ethis.etype ethis.epos in
 		let args1 = (ethis :: params) in
 		let args2 = ((vthis,None) :: f.tf_args) in
 		let vars = loop [] args1 args2 true in
@@ -414,10 +418,10 @@ class inline_state ctx ethis params cf f p = object(self)
 	method finalize config e tl tret p =
 		let has_params,map_type = match config with Some config -> config | None -> inline_default_config cf ethis.etype in
 		if self#had_side_effect then List.iter (fun (l,e) ->
-			if self#might_be_affected e then l.i_force_temp <- true;
+			if self#might_be_affected e && not (ExtType.has_value_semantics e.etype) then l.i_force_temp <- true;
 		) _inlined_vars;
 		let vars,subst = self#get_substitutions p in
-		let rec inline_params in_call e =
+		let rec inline_params in_call in_assignment e =
 			match e.eexpr with
 			| TLocal v ->
 				begin try
@@ -427,6 +431,7 @@ class inline_state ctx ethis params cf f p = object(self)
 							begin match e'.eexpr with
 								(* If we inline a function expression, we have to duplicate its locals. *)
 								| TFunction _ -> Texpr.duplicate_tvars e'
+								| TCast(e1,None) when in_assignment -> e1
 								| _ -> e'
 							end
 						| VIInlineIfCalled when in_call ->
@@ -439,12 +444,16 @@ class inline_state ctx ethis params cf f p = object(self)
 					e
 				end
 			| TCall(e1,el) ->
-				let e1 = inline_params true e1 in
-				let el = List.map (inline_params false) el in
+				let e1 = inline_params true false e1 in
+				let el = List.map (inline_params false false) el in
 				{e with eexpr = TCall(e1,el)}
-			| _ -> Type.map_expr (inline_params false) e
+			| TBinop((OpAssign | OpAssignOp _ as op),e1,e2) ->
+				let e1 = inline_params false true e1 in
+				let e2 = inline_params false false e2 in
+				{e with eexpr = TBinop(op,e1,e2)}
+			| _ -> Type.map_expr (inline_params false false) e
 		in
-		let e = (if PMap.is_empty subst then e else inline_params false e) in
+		let e = (if PMap.is_empty subst then e else inline_params false false e) in
 		let init = match vars with [] -> None | l -> Some l in
 		let md = ctx.curclass.cl_module.m_extra.m_display in
 		md.m_inline_calls <- (cf.cf_name_pos,{p with pmax = p.pmin + String.length cf.cf_name}) :: md.m_inline_calls;
@@ -525,7 +534,6 @@ let rec type_inline ctx cf f ethis params tret config p ?(self_calling_closure=f
 		| Some e -> Some (f e)
 	in
 	let in_loop = ref false in
-	let cancel_inlining = ref false in
 	let return_type t el =
 		(* If the function return is Dynamic or Void, stick to it. *)
 		if follow f.tf_type == t_dynamic || ExtType.is_void (follow f.tf_type) then f.tf_type
@@ -545,9 +553,6 @@ let rec type_inline ctx cf f ethis params tret config p ?(self_calling_closure=f
 				l.i_called <- l.i_called + i
 			else
 				l.i_read <- l.i_read + i;
-			(* never inline a function which contain a delayed macro because its bound
-				to its variables and not the calling method *)
-			if v.v_name = "$__delayed_call__" then cancel_inlining := true;
 			let e = { e with eexpr = TLocal l.i_subst } in
 			if l.i_abstract_this then mk (TCast(e,None)) v.v_type e.epos else e
 		| TConst TThis ->
@@ -684,6 +689,11 @@ let rec type_inline ctx cf f ethis params tret config p ?(self_calling_closure=f
 			{e with eexpr = TCall(e1,el)}
 		| TConst TSuper ->
 			error "Cannot inline function containing super" po
+		| TMeta((Meta.Ast,_,_) as m,e1) when term ->
+			(* Special case for @:ast-wrapped TSwitch nodes: If the recursion alters the type of the TSwitch node, we also want
+			   to alter the type of the TMeta node. *)
+			let e1 = map term in_call e1 in
+			{e with eexpr = TMeta(m,e1); etype = e1.etype}
 		| TMeta(m,e1) ->
 			let e1 = map term in_call e1 in
 			{e with eexpr = TMeta(m,e1)}
@@ -694,22 +704,18 @@ let rec type_inline ctx cf f ethis params tret config p ?(self_calling_closure=f
 			Type.map_expr (map false false) e
 	in
 	let e = map true false f.tf_expr in
-	if !cancel_inlining then
-		None
-	else begin
 	let tl = List.map (fun e -> "",false,e.etype) params in
-		let e = state#finalize config e tl tret p in
-		if Meta.has (Meta.Custom ":inlineDebug") ctx.meta then begin
-			let se t = s_expr_pretty true t true (s_type (print_context())) in
-			print_endline (Printf.sprintf "Inline %s:\n\tArgs: %s\n\tExpr: %s\n\tResult: %s"
-				cf.cf_name
-				(String.concat "" (List.map (fun (i,e) -> Printf.sprintf "\n\t\t%s<%i> = %s" (i.i_subst.v_name) (i.i_subst.v_id) (se "\t\t" e)) state#inlined_vars))
-				(se "\t" f.tf_expr)
-				(se "\t" e)
-			);
-		end;
-		Some e
-	end
+	let e = state#finalize config e tl tret p in
+	if Meta.has (Meta.Custom ":inlineDebug") ctx.meta then begin
+		let se t = s_expr_pretty true t true (s_type (print_context())) in
+		print_endline (Printf.sprintf "Inline %s:\n\tArgs: %s\n\tExpr: %s\n\tResult: %s"
+			cf.cf_name
+			(String.concat "" (List.map (fun (i,e) -> Printf.sprintf "\n\t\t%s<%i> = %s" (i.i_subst.v_name) (i.i_subst.v_id) (se "\t\t" e)) state#inlined_vars))
+			(se "\t" f.tf_expr)
+			(se "\t" e)
+		);
+	end;
+	Some e
 
 (* Same as type_inline, but modifies the function body to add field inits *)
 and type_inline_ctor ctx c cf tf ethis el po =

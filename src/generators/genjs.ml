@@ -303,7 +303,7 @@ let rec concat ctx s f = function
 let fun_block ctx f p =
 	let e = List.fold_left (fun e (a,c) ->
 		match c with
-		| None | Some TNull -> e
+		| None | Some {eexpr = TConst TNull} -> e
 		| Some c -> Type.concat (Texpr.set_default ctx.com.basic a c p) e
 	) f.tf_expr f.tf_args in
 	e
@@ -533,7 +533,7 @@ and gen_expr ctx e =
 		gen_value ctx x;
 		if not (Common.defined ctx.com Define.JsEnumsAsArrays) then
 			let fname = (match f.ef_type with TFun((args,_)) -> let fname,_,_ = List.nth args i in  fname | _ -> assert false ) in
-			print ctx ".%s" (fname)
+			print ctx ".%s" (ident fname)
 		else
 			print ctx "[%i]" (i + 2)
 	| TField (_, FStatic ({cl_path = [],""},f)) ->
@@ -744,7 +744,7 @@ and gen_expr ctx e =
 		gen_expr ctx e
 	| TCast (e1,Some t) ->
 		print ctx "%s.__cast(" (ctx.type_accessor (TClassDecl { null_class with cl_path = ["js"],"Boot" }));
-		gen_expr ctx e1;
+		gen_value ctx e1;
 		spr ctx " , ";
 		spr ctx (ctx.type_accessor t);
 		spr ctx ")"
@@ -783,7 +783,7 @@ and gen_value ctx e =
 	in
 	let value() =
 		let old = ctx.in_value, ctx.in_loop in
-		let r = alloc_var "$r" t_dynamic e.epos in
+		let r = alloc_var VGenerated "$r" t_dynamic e.epos in
 		ctx.in_value <- Some r;
 		ctx.in_loop <- false;
 		spr ctx "(function($this) ";
@@ -951,6 +951,17 @@ and gen_syntax ctx meth args pos =
 			| _ ->
 				Codegen.interpolate_code ctx.com code args (spr ctx) (gen_expr ctx) code_pos
 		end
+	| "field" , [eobj;efield] ->
+		gen_value ctx eobj;
+		(match Texpr.skip efield with
+		| { eexpr = TConst(TString(s)) } when valid_js_ident s ->
+			spr ctx ".";
+			spr ctx s;
+		| _ ->
+			spr ctx "[";
+			gen_value ctx efield;
+			spr ctx "]";
+		)
 	| _ ->
 		abort (Printf.sprintf "Unknown js.Syntax method `%s` with %d arguments" meth (List.length args)) pos
 
@@ -1039,7 +1050,7 @@ let generate_class___name__ ctx c =
 		let p = s_path ctx c.cl_path in
 		print ctx "%s.__name__ = " p;
 		if has_feature ctx "Type.getClassName" then
-			print ctx "[%s]" (String.concat "," (List.map (fun s -> Printf.sprintf "\"%s\"" (Ast.s_escape s)) (fst c.cl_path @ [snd c.cl_path])))
+			print ctx "\"%s\"" (dot_path c.cl_path)
 		else
 			print ctx "true";
 		newline ctx;
@@ -1143,7 +1154,6 @@ let generate_enum ctx e =
 	let p = s_path ctx e.e_path in
 	let dotp = dot_path e.e_path in
 	let has_enum_feature = has_feature ctx "has_enum" in
-	let ename = List.map (fun s -> Printf.sprintf "\"%s\"" (Ast.s_escape s)) (fst e.e_path @ [snd e.e_path]) in
 	if ctx.js_flatten then
 		print ctx "var "
 	else
@@ -1155,7 +1165,7 @@ let generate_enum ctx e =
 	else if has_feature ctx "Type.resolveEnum" then
 		print ctx "$hxClasses[\"%s\"] = " (dot_path e.e_path));
 	spr ctx "{";
-	if has_feature ctx "js.Boot.isEnum" then print ctx " __ename__ : %s," (if has_feature ctx "Type.getEnumName" then "[" ^ String.concat "," ename ^ "]" else "true");
+	if has_feature ctx "js.Boot.isEnum" then print ctx " __ename__ : %s," (if has_feature ctx "Type.getEnumName" then "\"" ^ dotp ^ "\"" else "true");
 	print ctx " __constructs__ : [%s]" (String.concat "," (List.map (fun s -> Printf.sprintf "\"%s\"" s) e.e_names));
 	let bend =
 		if not as_objects then begin
@@ -1480,7 +1490,7 @@ let generate com =
 	let vars = if has_feature ctx "has_enum"
 		then ("$estr = function() { return " ^ (ctx.type_accessor (TClassDecl { null_class with cl_path = ["js"],"Boot" })) ^ ".__string_rec(this,''); }") :: vars
 		else vars in
-	let vars = if enums_as_objects then "$hxEnums = {}" :: vars else vars in
+	let vars = if (enums_as_objects && (has_feature ctx "has_enum" || has_feature ctx "Type.resolveEnum")) then "$hxEnums = $hxEnums || {}" :: vars else vars in
 	let vars,has_dollar_underscore =
 		if List.exists (function TEnumDecl { e_extern = false } -> true | _ -> false) com.types then
 			"$_" :: vars,true
@@ -1495,13 +1505,20 @@ let generate com =
 		newline ctx
 	);
 	if List.exists (function TClassDecl { cl_extern = false; cl_super = Some _ } -> true | _ -> false) com.types then begin
-		print ctx "function $extend(from, fields) {
-	function Inherit() {} Inherit.prototype = from; var proto = new Inherit();
-	for (var name in fields) proto[name] = fields[name];
-	if( fields.toString !== Object.prototype.toString ) proto.toString = fields.toString;
-	return proto;
-}
-";
+		let extend_code =
+			"function $extend(from, fields) {\n" ^
+			(
+				if ctx.es_version < 5 then
+					"	function Inherit() {} Inherit.prototype = from; var proto = new Inherit();\n"
+				else
+					"	var proto = Object.create(from);\n"
+			) ^
+			"	for (var name in fields) proto[name] = fields[name];\n" ^
+			"	if( fields.toString !== Object.prototype.toString ) proto.toString = fields.toString;\n" ^
+			"	return proto;\n" ^
+			"}"
+		in
+		spr ctx extend_code
 	end;
 	List.iter (generate_type ctx) com.types;
 	let rec chk_features e =

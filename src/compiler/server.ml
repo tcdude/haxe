@@ -286,7 +286,7 @@ let rec wait_loop process_params verbose accept =
 					check_module_shadowing mctx.Typecore.com (get_changed_directories mctx) m
 			in
 			let has_policy policy = List.mem policy m.m_extra.m_check_policy || match policy with
-				| NoCheckShadowing | NoCheckFileTimeModification when !ServerConfig.do_not_check_modules -> true
+				| NoCheckShadowing | NoCheckFileTimeModification when !ServerConfig.do_not_check_modules && !Parser.display_mode <> DMNone -> true
 				| _ -> false
 			in
 			let check_file () =
@@ -360,8 +360,7 @@ let rec wait_loop process_params verbose accept =
 					) m.m_types;
 					TypeloadModule.add_module ctx m p;
 					PMap.iter (Hashtbl.replace com2.resources) m.m_extra.m_binded_res;
-					if ctx.Typecore.in_macro || com2.display.dms_full_typing then
-						PMap.iter (fun _ m2 -> add_modules (tabs ^ "  ") m0 m2) m.m_extra.m_deps;
+					PMap.iter (fun _ m2 -> add_modules (tabs ^ "  ") m0 m2) m.m_extra.m_deps;
 					List.iter (MacroContext.call_init_macro ctx) m.m_extra.m_reuse_macro_calls
 				)
 			end
@@ -491,13 +490,18 @@ let rec wait_loop process_params verbose accept =
 			let estr = Printexc.to_string e in
 			ServerMessage.uncaught_error estr;
 			(try write estr with _ -> ());
-			if is_debug_run() then print_endline (Printexc.get_backtrace());
+			if is_debug_run() then print_endline (estr ^ "\n" ^ Printexc.get_backtrace());
+			if e = Out_of_memory then begin
+				close();
+				exit (-1);
+			end;
 		);
 		close();
 		current_stdin := None;
 		(* prevent too much fragmentation by doing some compactions every X run *)
 		if !was_compilation then incr run_count;
 		if !run_count mod 10 = 0 then begin
+			run_count := 1;
 			let t0 = get_time() in
 			Gc.compact();
 			ServerMessage.gc_stats (get_time() -. t0);

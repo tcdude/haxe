@@ -72,15 +72,23 @@ module CompletionResultKind = struct
 		| CRTypeHint
 		| CRExtends
 		| CRImplements
-		| CRStructExtension
+		| CRStructExtension of bool
 		| CRImport
 		| CRUsing
 		| CRNew
-		| CRPattern
+		| CRPattern of (CompletionItem.CompletionType.t * CompletionItem.CompletionType.t) option * bool
 		| CROverride
 		| CRTypeRelation
+		| CRTypeDecl
 
 	let to_json ctx kind =
+		let expected_type_fields t = match t with
+			| None -> []
+			| Some(ct1,ct2) -> [
+					"expectedType",CompletionItem.CompletionType.to_json ctx ct1;
+					"expectedTypeFollowed",CompletionItem.CompletionType.to_json ctx ct2;
+				]
+		in
 		let i,args = match kind with
 			| CRField(item,p) ->
 				let t = CompletionItem.get_type item in
@@ -105,26 +113,26 @@ module CompletionResultKind = struct
 				in
 				0,Some (jobject fields)
 			| CRStructureField -> 1,None
-			| CRToplevel t ->
-				let args = match t with
-					| None -> None
-					| Some(ct1,ct2) -> Some (jobject [
-						"expectedType",CompletionItem.CompletionType.to_json ctx ct1;
-						"expectedTypeFollowed",CompletionItem.CompletionType.to_json ctx ct2;
-					])
-				in
-				2,args
+			| CRToplevel t -> 2,Some (jobject (expected_type_fields t))
 			| CRMetadata -> 3,None
 			| CRTypeHint -> 4,None
 			| CRExtends -> 5,None
 			| CRImplements -> 6,None
-			| CRStructExtension -> 7,None
+			| CRStructExtension isIntersectionType -> 7,Some (jobject [
+					"isIntersectionType",jbool isIntersectionType
+				])
 			| CRImport -> 8,None
 			| CRUsing -> 9,None
 			| CRNew -> 10,None
-			| CRPattern -> 11,None
+			| CRPattern (t,isOutermostPattern) ->
+				let fields =
+					("isOutermostPattern",jbool isOutermostPattern) ::
+					(expected_type_fields t)
+				in
+				11,Some (jobject fields)
 			| CROverride -> 12,None
 			| CRTypeRelation -> 13,None
+			| CRTypeDecl -> 14,None
 		in
 		jobject (
 			("kind",jint i) :: (match args with None -> [] | Some arg -> ["args",arg])
@@ -138,6 +146,7 @@ module DisplayMode = struct
 		| DMDefault
 		| DMUsage of bool (* true = also report definition *)
 		| DMDefinition
+		| DMTypeDefinition
 		| DMResolve of string
 		| DMPackage
 		| DMHover
@@ -199,7 +208,7 @@ module DisplayMode = struct
 		let settings = { default_display_settings with dms_kind = dm } in
 		match dm with
 		| DMNone -> default_compilation_settings
-		| DMDefault | DMDefinition | DMResolve _ | DMPackage | DMHover | DMSignature -> settings
+		| DMDefault | DMDefinition | DMTypeDefinition | DMResolve _ | DMPackage | DMHover | DMSignature -> settings
 		| DMUsage _ -> { settings with
 				dms_full_typing = true;
 				dms_force_macro_typing = true;
@@ -231,6 +240,7 @@ module DisplayMode = struct
 		| DMNone -> "none"
 		| DMDefault -> "field"
 		| DMDefinition -> "position"
+		| DMTypeDefinition -> "type-definition"
 		| DMResolve s -> "resolve " ^ s
 		| DMPackage -> "package"
 		| DMHover -> "type"

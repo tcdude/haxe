@@ -37,6 +37,7 @@ type output_options =
 	| OODecreaseIndent
 	| OOBeginBlock
 	| OOEndBlock
+	| OOBreak
 
 type function_entry = {
 	mutable fe_name : string;
@@ -606,6 +607,7 @@ let generate_function ctx f =
 				| OOLabel -> sline "%s:" (label i)
 				| OOCase i -> sline "case %i:" i
 				| OODefault -> line "default:"
+				| OOBreak -> line "break;";
 				| OOIncreaseIndent -> block()
 				| OODecreaseIndent -> unblock()
 				| OOBeginBlock ->  line "{"
@@ -940,12 +942,17 @@ let generate_function ctx f =
 		| OSwitch (r,idx,eend) ->
 			sline "switch(%s) {" (reg r);
 			block();
-			output_at2 (i + 1) [OODefault;OOIncreaseIndent];
-			Array.iteri (fun k delta -> output_at2 (delta + i + 1) [OODecreaseIndent;OOCase k;OOIncreaseIndent]) idx;
 			let pend = i+1+eend in
 			(* insert at end if we have another switch case here *)
 			let old = output_options.(pend) in
 			output_options.(pend) <- [];
+			(* insert cases *)
+			output_at2 (i + 1) [OODefault;OOIncreaseIndent];
+			Array.iteri (fun k delta ->
+				output_at2 (delta + i + 1) [OODecreaseIndent;OOCase k;OOIncreaseIndent];
+				if delta = eend then output_at pend OOBreak;
+			) idx;
+			(* insert end switch *)
 			output_at2 pend ([OODecreaseIndent;OODecreaseIndent;OOEndBlock] @ List.rev old);
 		| ONullCheck r ->
 			sexpr "if( %s == NULL ) hl_null_access()" (reg r)
@@ -1215,7 +1222,7 @@ let write_c com file (code:code) =
 				sexpr "}";
 			end
 		end else if String.length str >= string_data_limit then
-			let s = utf8_to_utf16 str in
+			let s = Common.utf8_to_utf16 str true in
 			sline "// %s..." (String.escaped (String.sub str 0 (string_data_limit-4)));
 			output ctx (Printf.sprintf "vbyte string$%d[] = {" i);
 			output_bytes (output ctx) s;
@@ -1455,7 +1462,7 @@ let write_c com file (code:code) =
 	block ctx;
 	sline "\"version\" : %d," ctx.version;
 	sline "\"libs\" : [%s]," (String.concat "," (Hashtbl.fold (fun k _ acc -> sprintf "\"%s\"" k :: acc) native_libs []));
-	sline "\"defines\" : {%s\n\t}," (String.concat "," (PMap.foldi (fun k v acc -> sprintf "\n\t\t\"%s\" : \"%s\"" k v :: acc) com.Common.defines.Define.values []));
+	sline "\"defines\" : {%s\n\t}," (String.concat "," (PMap.foldi (fun k v acc -> sprintf "\n\t\t\"%s\" : \"%s\"" (String.escaped k) (String.escaped v) :: acc) com.Common.defines.Define.values []));
 	sline "\"files\" : [%s\n\t]" (String.concat "," (List.map (sprintf "\n\t\t\"%s\"") ctx.cfiles));
 	unblock ctx;
 	line "}";

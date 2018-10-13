@@ -36,14 +36,30 @@ let type_function_arg ctx t e opt p =
 		let t = match e with Some (EConst (Ident "null"),null_pos) -> ctx.t.tnull t | _ -> t in
 		t, e
 
+let save_field_state ctx =
+	let old_ret = ctx.ret in
+	let old_fun = ctx.curfun in
+	let old_opened = ctx.opened in
+	let locals = ctx.locals in
+	(fun () ->
+		ctx.locals <- locals;
+		ctx.ret <- old_ret;
+		ctx.curfun <- old_fun;
+		ctx.opened <- old_opened;
+	)
+
 let type_var_field ctx t e stat do_display p =
 	if stat then ctx.curfun <- FunStatic else ctx.curfun <- FunMember;
 	let e = if do_display then Display.ExprPreprocessing.process_expr ctx.com e else e in
-	let e = type_expr ctx e (WithType t) in
+	let e = type_expr ctx e (WithType.with_type t) in
 	let e = AbstractCast.cast_or_unify ctx t e p in
 	match t with
 	| TType ({ t_path = ([],"UInt") },[]) | TAbstract ({ a_path = ([],"UInt") },[]) when stat -> { e with etype = t }
 	| _ -> e
+
+let type_var_field ctx t e stat do_display p =
+	let save = save_field_state ctx in
+	Std.finally save (type_var_field ctx t e stat do_display) p
 
 let type_function_params ctx fd fname p =
 	let params = ref [] in
@@ -56,10 +72,11 @@ let type_function_arg_value ctx t c do_display =
 		| Some e ->
 			let p = pos e in
 			let e = if do_display then Display.ExprPreprocessing.process_expr ctx.com e else e in
-			let e = ctx.g.do_optimize ctx (type_expr ctx e (WithType t)) in
+			let e = ctx.g.do_optimize ctx (type_expr ctx e (WithType.with_type t)) in
 			unify ctx e.etype t p;
 			let rec loop e = match e.eexpr with
-				| TConst c -> Some c
+				| TConst _ -> Some e
+				| TField({eexpr = TTypeExpr _},FEnum _) -> Some e
 				| TCast(e,None) -> loop e
 				| _ ->
 					if ctx.com.display.dms_kind = DMNone || ctx.com.display.dms_inline && ctx.com.display.dms_error_policy = EPCollect then
@@ -68,23 +85,11 @@ let type_function_arg_value ctx t c do_display =
 			in
 			loop e
 
-let save_function_state ctx =
-	let old_ret = ctx.ret in
-	let old_fun = ctx.curfun in
-	let old_opened = ctx.opened in
-	let locals = ctx.locals in
-	(fun () ->
-		ctx.locals <- locals;
-		ctx.ret <- old_ret;
-		ctx.curfun <- old_fun;
-		ctx.opened <- old_opened;
-	)
-
 let type_function ctx args ret fmode f do_display p =
 	let fargs = List.map2 (fun (n,c,t) ((_,pn),_,m,_,_) ->
 		if starts_with n '$' then error "Function argument names starting with a dollar are not allowed" p;
 		let c = type_function_arg_value ctx t c do_display in
-		let v,c = add_local_with_origin ctx n t pn (TVarOrigin.TVOArgument), c in
+		let v,c = add_local_with_origin ctx TVOArgument n t pn , c in
 		v.v_meta <- v.v_meta @ m;
 		if do_display && DisplayPosition.encloses_display_position pn then
 			DisplayEmitter.display_variable ctx v pn;
@@ -196,7 +201,7 @@ let type_function ctx args ret fmode f do_display p =
 	e , fargs
 
 let type_function ctx args ret fmode f do_display p =
-	let save = save_function_state ctx in
+	let save = save_field_state ctx in
 	Std.finally save (type_function ctx args ret fmode f do_display) p
 
 let add_constructor ctx c force_constructor p =
@@ -223,11 +228,12 @@ let add_constructor ctx c force_constructor p =
 					let's optimize a bit the output by not always copying the default value
 					into the inherited constructor when it's not necessary for the platform
 				*)
+				let null () = Some (Texpr.Builder.make_null v.v_type v.v_pos) in
 				match ctx.com.platform, def with
-				| _, Some _ when not ctx.com.config.pf_static -> v, (Some TNull)
-				| Flash, Some (TString _) -> v, (Some TNull)
-				| Cpp, Some (TString _) -> v, def
-				| Cpp, Some _ -> { v with v_type = ctx.t.tnull v.v_type }, (Some TNull)
+				| _, Some _ when not ctx.com.config.pf_static -> v, null()
+				| Flash, Some ({eexpr = TConst (TString _)}) -> v, null()
+				| Cpp, Some ({eexpr = TConst (TString _)}) -> v, def
+				| Cpp, Some _ -> { v with v_type = ctx.t.tnull v.v_type }, null()
 				| _ -> v, def
 			in
 			let args = (match cfsup.cf_expr with
@@ -238,13 +244,17 @@ let add_constructor ctx c force_constructor p =
 					match follow cfsup.cf_type with
 					| TFun (args,_) ->
 						List.map (fun (n,o,t) ->
-							let def = try type_function_arg_value ctx t (Some (PMap.find n values)) false with Not_found -> if o then Some TNull else None in
-							map_arg (alloc_var n (if o then ctx.t.tnull t else t) p,def) (* TODO: var pos *)
+							let def = try
+								type_function_arg_value ctx t (Some (PMap.find n values)) false
+							with Not_found ->
+								if o then Some (Texpr.Builder.make_null t null_pos) else None
+							in
+							map_arg (alloc_var (VUser TVOArgument) n (if o then ctx.t.tnull t else t) p,def) (* TODO: var pos *)
 						) args
 					| _ -> assert false
 			) in
 			let p = c.cl_pos in
-			let vars = List.map (fun (v,def) -> alloc_var v.v_name (apply_params csup.cl_params cparams v.v_type) v.v_pos, def) args in
+			let vars = List.map (fun (v,def) -> alloc_var (VUser TVOArgument) v.v_name (apply_params csup.cl_params cparams v.v_type) v.v_pos, def) args in
 			let super_call = mk (TCall (mk (TConst TSuper) (TInst (csup,cparams)) p,List.map (fun (v,_) -> mk (TLocal v) v.v_type p) vars)) ctx.t.tvoid p in
 			let constr = mk (TFunction {
 				tf_args = vars;

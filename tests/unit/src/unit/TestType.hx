@@ -179,7 +179,7 @@ class TestType extends Test {
 		typedAs([ { x : new Child1() }, { x : new Child2() } ], [{ x: new Base() }]);
 
 		#if flash
-		typedAs(function() { return 0; var v:UInt = 0; return v; } (), 1);
+		typedAs((function() { return 0; var v:UInt = 0; return v; }) (), 1);
 		#end
 	}
 
@@ -261,7 +261,7 @@ class TestType extends Test {
  		eq("foo0", f());
 
 		var foo = function(bar = 2) { return bar; };
-		#if (flash || hl) // Cannot skip not-nullable argument
+		#if flash // Cannot skip not-nullable argument
 		t(typeError(foo.bind(_)));
 		#else
 		var l = foo.bind(_);

@@ -210,6 +210,12 @@ let rec sanitize com e =
 (* ---------------------------------------------------------------------- *)
 (* REDUCE *)
 
+let check_enum_construction_args el i =
+	let b,_ = List.fold_left (fun (b,i') e ->
+		(b && (i' = i || not (has_side_effect e))),i' + 1
+	) (true,0) el in
+	b
+
 let reduce_control_flow ctx e = match e.eexpr with
 	| TIf ({ eexpr = TConst (TBool t) },e1,e2) ->
 		(if t then e1 else match e2 with None -> { e with eexpr = TBlock [] } | Some e -> e)
@@ -242,6 +248,10 @@ let reduce_control_flow ctx e = match e.eexpr with
 	| TCall ({ eexpr = TField (o,FClosure (c,cf)) } as f,el) ->
 		let fmode = (match c with None -> FAnon cf | Some (c,tl) -> FInstance (c,tl,cf)) in
 		{ e with eexpr = TCall ({ f with eexpr = TField (o,fmode) },el) }
+	| TEnumParameter({eexpr = TCall({eexpr = TField(_,FEnum(_,ef1))},el)},ef2,i)
+	| TEnumParameter({eexpr = TParenthesis {eexpr = TCall({eexpr = TField(_,FEnum(_,ef1))},el)}},ef2,i)
+		when ef1 == ef2 && check_enum_construction_args el i ->
+		(try List.nth el i with Failure _ -> e)
 	| _ ->
 		e
 
@@ -384,8 +394,7 @@ let inline_constructors ctx e =
 	in
 	let add_field_var v s t =
 		let ii = IntMap.find v.v_id !vars in
-		let v' = alloc_var (Printf.sprintf "%s_%s" v.v_name s) t v.v_pos in
-		v'.v_meta <- (Meta.InlineConstructorVariable,[],v.v_pos) :: v'.v_meta;
+		let v' = alloc_var VInlinedConstructorVariable (Printf.sprintf "%s_%s" v.v_name s) t v.v_pos in
 		ii.ii_fields <- PMap.add s v' ii.ii_fields;
 		v'
 	in
@@ -619,10 +628,10 @@ let optimize_completion_expr e args =
 				());
 			map e
 		| EVars vl ->
-			let vl = List.map (fun ((v,pv),t,e) ->
+			let vl = List.map (fun ((v,pv),final,t,e) ->
 				let e = (match e with None -> None | Some e -> Some (loop e)) in
 				decl v (Option.map fst t) e;
-				((v,pv),t,e)
+				((v,pv),final,t,e)
 			) vl in
 			(EVars vl,p)
 		| EBlock el ->
@@ -651,7 +660,7 @@ let optimize_completion_expr e args =
 			let old = save() in
 			let etmp = (EConst (Ident "$tmp"),p) in
 			decl n None (Some (EBlock [
-				(EVars [("$tmp",null_pos),None,None],p);
+				(EVars [("$tmp",null_pos),false,None,None],p);
 				(EFor ((EBinop (OpIn,id,it),p),(EBinop (OpAssign,etmp,(EConst (Ident n),p)),p)),p);
 				etmp
 			],p));
@@ -706,6 +715,15 @@ let optimize_completion_expr e args =
 				(n,pn), (t,pt), e, p
 			) cl in
 			(ETry (et,cl),p)
+		| ECall(e1,el) when DisplayPosition.encloses_display_position p ->
+			let e1 = loop e1 in
+			let el = List.map (fun e ->
+				if DisplayPosition.encloses_display_position (pos e) then
+					(try loop e with Return e -> e)
+				else
+					(EConst (Ident "null"),(pos e))
+			) el in
+			(ECall(e1,el),p)
 		| ECheckType(e1,th) ->
 			typing_side_effect := true;
 			let e1 = loop e1 in
@@ -737,7 +755,7 @@ let optimize_completion_expr e args =
 							with Not_found ->
 								let e = subst_locals lc e in
 								let name = "$tmp_" ^ string_of_int id in
-								tmp_locals := ((name,null_pos),None,Some e) :: !tmp_locals;
+								tmp_locals := ((name,null_pos),false,None,Some e) :: !tmp_locals;
 								tmp_hlocals := PMap.add id name !tmp_hlocals;
 								name
 							) in

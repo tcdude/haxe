@@ -14,19 +14,40 @@ open Common
 open Display
 open DisplayPosition
 
-let sort_fields l with_type p =
+let get_expected_name with_type = match with_type with
+	| WithType.Value (Some s) | WithType.WithType(_,Some s) -> Some s
+	| _ -> None
+
+let sort_fields l with_type tk =
+	let p = match tk with
+		| TKExpr p | TKField p -> Some p
+		| _ -> None
+	in
+	let expected_name = get_expected_name with_type in
 	let l = List.map (fun ci ->
-		let i = get_sort_index ci (Option.default Globals.null_pos p) in
+		let i = get_sort_index tk ci (Option.default Globals.null_pos p) (Option.map fst expected_name) in
 		ci,i
 	) l in
 	let sort l =
 		List.map fst (List.sort (fun (_,i1) (_,i2) -> compare i1 i2) l)
 	in
+	(* This isn't technically accurate, but I don't think it matters. *)
+	let rec dynamify_type_params t = match follow t with
+		| TInst({cl_kind = KTypeParameter _},_) -> mk_mono()
+		| _ -> Type.map dynamify_type_params t
+	in
 	let l = match with_type with
-		| WithType t when (match follow t with TMono _ -> false | _ -> true) ->
-			let rec comp t' = match t' with
+		| WithType.WithType(t,_) when (match follow t with TMono _ -> false | _ -> true) ->
+			let rec comp item = match item.ci_type with
 				| None -> 9
 				| Some (t',_) ->
+				(* For enum constructors, we consider the return type of the constructor function
+				   so it has the same priority as argument-less constructors. *)
+				let t' = match item.ci_kind,follow t' with
+					| ITEnumField _,TFun(_,r) -> r
+					| _ -> t'
+				in
+				let t' = dynamify_type_params t' in
 				if type_iseq t' t then 0 (* equal types - perfect *)
 				else if t' == t_dynamic then 5 (* dynamic isn't good, but better than incompatible *)
 				else try Type.unify t' t; 1 (* assignable - great *)
@@ -38,9 +59,9 @@ let sort_fields l with_type p =
 					| _ ->
 						6 (* incompatible type - probably useless *)
 			in
-			let l = List.map (fun (ck,i1) ->
-				let i2 = comp (get_type ck) in
-				ck,(i2,i1)
+			let l = List.map (fun (item,i1) ->
+				let i2 = comp item in
+				item,(i2,i1)
 			) l in
 			sort l
 		| _ ->
@@ -119,29 +140,39 @@ let completion_type_of_type ctx ?(values=PMap.empty) t =
 	from_type values t
 
 let display_module_type ctx mt p = match ctx.com.display.dms_kind with
-	| DMDefinition -> raise_position [(t_infos mt).mt_name_pos];
+	| DMDefinition | DMTypeDefinition ->
+		begin match mt with
+		| TClassDecl c when Meta.has Meta.CoreApi c.cl_meta ->
+			let c' = ctx.g.do_load_core_class ctx c in
+			raise_position [c.cl_name_pos;c'.cl_name_pos]
+		| _ ->
+			raise_position [(t_infos mt).mt_name_pos];
+		end
 	| DMUsage _ ->
 		let infos = t_infos mt in
-		reference_position := (snd infos.mt_path,infos.mt_name_pos,KModuleType)
+		ReferencePosition.set (snd infos.mt_path,infos.mt_name_pos,KModuleType)
 	| DMHover ->
 		let t = type_of_module_type mt in
 		let ct = completion_type_of_type ctx t in
-		raise_hover (make_ci_type (CompletionModuleType.of_module_type mt) ImportStatus.Imported (Some (t,ct))) p
+		raise_hover (make_ci_type (CompletionModuleType.of_module_type mt) ImportStatus.Imported (Some (t,ct))) None p
 	| _ -> ()
 
 let rec display_type ctx t p =
 	let dm = ctx.com.display in
-	match dm.dms_kind with
-	| DMHover ->
-		let ct = completion_type_of_type ctx t in
-		let ci = make_ci_expr (mk (TConst TNull) t p) (t,ct) in
-		raise_hover ci p
-	| _ ->
-		try display_module_type ctx (module_type_of_type t) p
-		with Exit -> match follow t,follow !t_dynamic_def with
-			| _,TDynamic _ -> () (* sanity check in case it's still t_dynamic *)
-			| TDynamic _,_ -> display_type ctx !t_dynamic_def p
-			| _ -> ()
+	try
+		display_module_type ctx (module_type_of_type t) p
+	with Exit ->
+		match follow t,follow !t_dynamic_def with
+		| _,TDynamic _ -> () (* sanity check in case it's still t_dynamic *)
+		| TDynamic _,_ -> display_type ctx !t_dynamic_def p
+		| _ ->
+			match dm.dms_kind with
+			| DMHover ->
+				let ct = completion_type_of_type ctx t in
+				let ci = make_ci_expr (mk (TConst TNull) t p) (t,ct) in
+				raise_hover ci None p
+			| _ ->
+				()
 
 let check_display_type ctx t p =
 	let add_type_hint () =
@@ -155,16 +186,35 @@ let check_display_type ctx t p =
 	add_type_hint();
 	maybe_display_type()
 
+let raise_position_of_type t =
+	let mt =
+		let rec follow_null t =
+			match t with
+				| TMono r -> (match !r with None -> raise_position [null_pos] | Some t -> follow_null t)
+				| TLazy f -> follow_null (lazy_type f)
+				| TAbstract({a_path = [],"Null"},[t]) -> follow_null t
+				| TDynamic _ -> !t_dynamic_def
+				| _ -> t
+		in
+		try
+			Type.module_type_of_type (follow_null t)
+		with
+			Exit -> raise_position [null_pos]
+	in
+	raise_position [(t_infos mt).mt_name_pos]
+
 let display_variable ctx v p = match ctx.com.display.dms_kind with
 	| DMDefinition -> raise_position [v.v_pos]
-	| DMUsage _ -> reference_position := (v.v_name,v.v_pos,KVar)
+	| DMTypeDefinition -> raise_position_of_type v.v_type
+	| DMUsage _ -> ReferencePosition.set (v.v_name,v.v_pos,KVar)
 	| DMHover ->
 		let ct = completion_type_of_type ctx ~values:(get_value_meta v.v_meta) v.v_type in
-		raise_hover (make_ci_local v (v.v_type,ct)) p
+		raise_hover (make_ci_local v (v.v_type,ct)) None p
 	| _ -> ()
 
 let display_field ctx origin scope cf p = match ctx.com.display.dms_kind with
 	| DMDefinition -> raise_position [cf.cf_name_pos]
+	| DMTypeDefinition -> raise_position_of_type cf.cf_type
 	| DMUsage _ ->
 		let name,kind = match cf.cf_name,origin with
 			| "new",(Self (TClassDecl c) | Parent(TClassDecl c)) ->
@@ -173,7 +223,7 @@ let display_field ctx origin scope cf p = match ctx.com.display.dms_kind with
 			| _ ->
 				cf.cf_name,KClassField
 		in
-		reference_position := (name,cf.cf_name_pos,kind)
+		ReferencePosition.set (name,cf.cf_name_pos,kind)
 	| DMHover ->
 		let cf = if Meta.has Meta.Impl cf.cf_meta then
 			prepare_using_field cf
@@ -185,7 +235,7 @@ let display_field ctx origin scope cf p = match ctx.com.display.dms_kind with
             | _ -> cf
         in
 		let ct = completion_type_of_type ctx ~values:(get_value_meta cf.cf_meta) cf.cf_type in
-		raise_hover (make_ci_class_field (CompletionClassField.make cf scope origin true) (cf.cf_type,ct)) p
+		raise_hover (make_ci_class_field (CompletionClassField.make cf scope origin true) (cf.cf_type,ct)) None p
 	| _ -> ()
 
 let maybe_display_field ctx origin scope cf p =
@@ -193,30 +243,28 @@ let maybe_display_field ctx origin scope cf p =
 
 let display_enum_field ctx en ef p = match ctx.com.display.dms_kind with
 	| DMDefinition -> raise_position [ef.ef_name_pos]
-	| DMUsage _ -> reference_position := (ef.ef_name,ef.ef_name_pos,KEnumField)
+	| DMTypeDefinition -> raise_position_of_type ef.ef_type
+	| DMUsage _ -> ReferencePosition.set (ef.ef_name,ef.ef_name_pos,KEnumField)
 	| DMHover ->
 		let ct = completion_type_of_type ctx ef.ef_type in
-		raise_hover (make_ci_enum_field (CompletionEnumField.make ef (Self (TEnumDecl en)) true) (ef.ef_type,ct)) p
+		raise_hover (make_ci_enum_field (CompletionEnumField.make ef (Self (TEnumDecl en)) true) (ef.ef_type,ct)) None p
 	| _ -> ()
 
 let display_meta com meta p = match com.display.dms_kind with
 	| DMHover ->
 		begin match meta with
 		| Meta.Custom _ | Meta.Dollar _ -> ()
-		| _ -> match Meta.get_documentation meta with
-			| None -> ()
-			| Some (_,s) ->
-				(* TODO: hack until we support proper output for hover display mode *)
-				if com.json_out = None then
+		| _ ->
+			if com.json_out = None then begin match Meta.get_documentation meta with
+				| None -> ()
+				| Some (_,s) ->
 					raise_metadata ("<metadata>" ^ s ^ "</metadata>")
-				else
-					raise_hover (make_ci_metadata (Meta.to_string meta) (Some s)) p
+			end else
+				raise_hover (make_ci_metadata meta) None p
 		end
 	| DMDefault ->
-		let all,_ = Meta.get_documentation_list() in
-		let all = List.map (fun (s,doc) ->
-			make_ci_metadata s (Some doc)
-		) all in
+		let all = Meta.get_all() in
+		let all = List.map make_ci_metadata all in
 		raise_fields all CRMetadata (Some p)
 	| _ ->
 		()
@@ -227,7 +275,7 @@ let check_display_metadata ctx meta =
 		List.iter (fun e ->
 			if encloses_display_position (pos e) then begin
 				let e = ExprPreprocessing.process_expr ctx.com e in
-				delay ctx PTypeField (fun _ -> ignore(type_expr ctx e Value));
+				delay ctx PTypeField (fun _ -> ignore(type_expr ctx e WithType.value));
 			end
 		) args
 	) meta
@@ -251,6 +299,6 @@ let check_field_modifiers ctx c cf override display_modifier =
 				let ct = completion_type_of_type ctx ~values:(get_value_meta cf.cf_meta) cf.cf_type in
 				make_ci_class_field (CompletionClassField.make cf CFSMember origin true) (cf.cf_type,ct) :: fields
 			) missing_fields [] in
-			let l = sort_fields l NoValue None in
+			let l = sort_fields l NoValue TKOverride in
 			raise_fields l CROverride None
 		| _ -> ()
