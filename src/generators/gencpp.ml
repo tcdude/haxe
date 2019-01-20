@@ -3753,7 +3753,7 @@ let gen_cpp_ast_expression_tree ctx class_name func_name function_args function_
             out ")";
          end else begin
             out ("hx::Anon_obj::Create(" ^ lengthStr ^")");
-            let sorted = List.sort (fun  (_,_,h0) (_,_,h1) -> Int32.compare h0 h1 )
+            let sorted = (*List.sort (fun  (_,_,h0) (_,_,h1) -> Int32.compare h0 h1 )*)
                 (List.map (fun (name,value) -> name,value,(gen_hash32 0 name ) ) values) in
             writer#push_indent;
             ExtList.List.iteri (fun idx (name,value,_) ->
