@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -299,7 +299,7 @@ struct
 						| TClassDecl{ cl_path = (["haxe"], "Int64") } ->
 							mk_is true obj i64_md
 						| TAbstractDecl{ a_path = ([], "Dynamic") }
-						| TClassDecl{ cl_path = ([], "Dynamic") } ->
+						| TClassDecl{ cl_path = ([], "Dynamic") } when not (is_nullable obj.etype) ->
 							(match obj.eexpr with
 								| TLocal _ | TConst _ -> { e with eexpr = TConst(TBool true) }
 								| _ -> { e with eexpr = TBlock([run obj; { e with eexpr = TConst(TBool true) }]) }
@@ -1396,7 +1396,7 @@ let generate con =
 		else fun w p ->
 			let cur_line = Lexer.get_error_line p in
 			let file = Path.get_full_path p.pfile in
-			print w "//line %d \"%s\"" cur_line (Ast.s_escape file); newline w
+			print w "//line %d \"%s\"" cur_line (StringHelper.s_escape file); newline w
 	in
 
 	let extract_statements expr =
@@ -2585,7 +2585,7 @@ let generate con =
 
 	ExpressionUnwrap.configure gen;
 
-	UnnecessaryCastsRemoval.configure gen;
+	(* UnnecessaryCastsRemoval.configure gen; *)
 
 	IntDivisionSynf.configure gen;
 

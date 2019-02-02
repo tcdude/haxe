@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -245,7 +245,7 @@ and jit_expr jit return e =
 		) cases;
 		let exec_def = jit_default jit return def in
 		let l = !max - !min + 1 in
-		if l < 256 then begin
+		if l > 0 && l < 256 then begin
 			let cases = Array.init l (fun i -> try IntMap.find (i + !min) !h with Not_found -> exec_def) in
 			emit_int_switch_array (- !min) exec cases exec_def e1.epos
 		end else
