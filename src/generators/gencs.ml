@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -1097,7 +1097,7 @@ let generate con =
 				let cur_line = Lexer.get_error_line p in
 				let file = Path.get_full_path p.pfile in
 				if cur_line <> ((!last_line)+1) then
-					let line = Ast.s_escape file in
+					let line = StringHelper.s_escape file in
 					if String.length line <= 256 then
 						begin print w "#line %d \"%s\"" cur_line line; newline w end
 					else (* Compiler Error CS1560 https://msdn.microsoft.com/en-us/library/z3t5e5sw(v=vs.90).aspx *)
@@ -3075,7 +3075,7 @@ let generate con =
 						{ e with eexpr = TBinop(op, e1, mk_cast t2 e2) }
 					| _ ->
 							let handler = if is_string e1.etype then begin
-									{ e1 with eexpr = TCall(mk_static_field_access_infer string_cl "Compare" e1.epos [], [ e1; e2 ]); etype = gen.gcon.basic.tint }
+									{ e1 with eexpr = TCall(mk_static_field_access_infer string_cl "CompareOrdinal" e1.epos [], [ e1; e2 ]); etype = gen.gcon.basic.tint }
 								end else begin
 									let static = mk_static_field_access_infer (runtime_cl) "compare" e1.epos [] in
 									{ eexpr = TCall(static, [e1; e2]); etype = gen.gcon.basic.tint; epos=e1.epos }
@@ -3107,7 +3107,7 @@ let generate con =
 
 		ExpressionUnwrap.configure gen;
 
-		UnnecessaryCastsRemoval.configure gen;
+		(* UnnecessaryCastsRemoval.configure gen; *)
 
 		IntDivisionSynf.configure gen;
 

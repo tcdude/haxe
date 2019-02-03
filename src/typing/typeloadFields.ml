@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -359,11 +359,11 @@ let build_module_def ctx mt meta fvars context_init fbuild =
 				) in
 				let s = try String.concat "." (List.rev (string_list_of_expr_path epath)) with Error (_,p) -> error "Build call parameter must be a class path" p in
 				if ctx.in_macro then error "You cannot use @:build inside a macro : make sure that your type is not used in macro" p;
-				let old = ctx.g.get_build_infos in
-				ctx.g.get_build_infos <- (fun() -> Some (mt, List.map snd (t_infos mt).mt_params, fvars()));
+				let old = ctx.get_build_infos in
+				ctx.get_build_infos <- (fun() -> Some (mt, List.map snd (t_infos mt).mt_params, fvars()));
 				context_init();
-				let r = try apply_macro ctx MBuild s el p with e -> ctx.g.get_build_infos <- old; raise e in
-				ctx.g.get_build_infos <- old;
+				let r = try apply_macro ctx MBuild s el p with e -> ctx.get_build_infos <- old; raise e in
+				ctx.get_build_infos <- old;
 				(match r with
 				| None -> error "Build failure" p
 				| Some e -> fbuild e)
@@ -1195,7 +1195,7 @@ let create_property (ctx,cctx,fctx) c f (get,set,t,eo) p =
 			if not cctx.is_lib then delay_check (fun() -> check_method get t_get);
 			AccCall
 		| _,pget ->
-			display_error ctx (name ^ ": Custom property accessor is no longer supported, please use get") p;
+			display_error ctx (name ^ ": Custom property accessor is no longer supported, please use `get`") pget;
 			AccCall
 	) in
 	let set = (match set with
@@ -1214,7 +1214,7 @@ let create_property (ctx,cctx,fctx) c f (get,set,t,eo) p =
 			if not cctx.is_lib then delay_check (fun() -> check_method set t_set);
 			AccCall
 		| _,pset ->
-			display_error ctx (name ^ ": Custom property accessor is no longer supported, please use set") p;
+			display_error ctx (name ^ ": Custom property accessor is no longer supported, please use `set`") pset;
 			AccCall
 	) in
 	if (set = AccNormal && get = AccCall) || (set = AccNever && get = AccNever)  then error (name ^ ": Unsupported property combination") p;
@@ -1357,7 +1357,7 @@ let init_class ctx c p context_init herits fields =
 						(if not (Meta.has Meta.Overload mainf.cf_meta) then display_error ctx ("Overloaded methods must have @:overload metadata") mainf.cf_pos);
 						mainf.cf_overloads <- cf :: mainf.cf_overloads
 					else
-						display_error ctx ("Duplicate class field declaration : " ^ cf.cf_name) p
+						display_error ctx ("Duplicate class field declaration : " ^ s_type_path c.cl_path ^ "." ^ cf.cf_name) p
 				else
 				if fctx.do_add then add_field c cf (fctx.is_static || fctx.is_macro && ctx.in_macro)
 			end

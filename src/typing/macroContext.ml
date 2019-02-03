@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -43,8 +43,6 @@ end
 
 let macro_enable_cache = ref false
 let macro_interp_cache = ref None
-let macro_interp_on_reuse = ref []
-let macro_interp_reused = ref false
 
 let safe_decode v t p f =
 	try
@@ -167,21 +165,21 @@ let make_macro_api ctx p =
 			)
 		);
 		MacroApi.after_typing = (fun f ->
-			Common.add_typing_filter ctx.com (fun tl ->
+			ctx.com.callbacks#add_after_typing (fun tl ->
 				let t = macro_timer ctx ["afterTyping"] in
 				f tl;
 				t()
 			)
 		);
-		MacroApi.on_generate = (fun f ->
-			Common.add_filter ctx.com (fun() ->
+		MacroApi.on_generate = (fun f b ->
+			(if b then ctx.com.callbacks#add_before_save else ctx.com.callbacks#add_after_save) (fun() ->
 				let t = macro_timer ctx ["onGenerate"] in
 				f (List.map type_of_module_type ctx.com.types);
 				t()
 			)
 		);
 		MacroApi.after_generate = (fun f ->
-			Common.add_final_filter ctx.com (fun() ->
+			ctx.com.callbacks#add_after_generation (fun() ->
 				let t = macro_timer ctx ["afterGenerate"] in
 				f();
 				t()
@@ -249,14 +247,15 @@ let make_macro_api ctx p =
 			);
 		);
 		MacroApi.get_local_type = (fun() ->
-			match ctx.g.get_build_infos() with
+			match ctx.get_build_infos() with
 			| Some (mt,tl,_) ->
 				Some (match mt with
 					| TClassDecl c -> TInst (c,tl)
 					| TEnumDecl e -> TEnum (e,tl)
 					| TTypeDecl t -> TType (t,tl)
-					| TAbstractDecl a -> TAbstract(a,tl))
-			| None ->
+					| TAbstractDecl a -> TAbstract(a,tl)
+				)
+			| _ ->
 				if ctx.curclass == null_class then
 					None
 				else
@@ -285,7 +284,7 @@ let make_macro_api ctx p =
 			ctx.locals;
 		);
 		MacroApi.get_build_fields = (fun() ->
-			match ctx.g.get_build_infos() with
+			match ctx.get_build_infos() with
 			| None -> Interp.vnull
 			| Some (_,_,fields) -> Interp.encode_array (List.map Interp.encode_field fields)
 		);
@@ -335,12 +334,13 @@ let make_macro_api ctx p =
 			end
 		);
 		MacroApi.module_dependency = (fun mpath file ->
-			let m = typing_timer ctx false (fun() -> TypeloadModule.load_module ctx (parse_path mpath) p) in
+			let m = typing_timer ctx false (fun() ->
+				let old_deps = ctx.m.curmod.m_extra.m_deps in
+				let m = TypeloadModule.load_module ctx (parse_path mpath) p in
+				ctx.m.curmod.m_extra.m_deps <- old_deps;
+				m
+			) in
 			add_dependency m (create_fake_module ctx file);
-		);
-		MacroApi.module_reuse_call = (fun mpath call ->
-			let m = typing_timer ctx false (fun() -> TypeloadModule.load_module ctx (parse_path mpath) p) in
-			m.m_extra.m_reuse_macro_calls <- call :: List.filter ((<>) call) m.m_extra.m_reuse_macro_calls
 		);
 		MacroApi.current_module = (fun() ->
 			ctx.m.curmod
@@ -381,9 +381,6 @@ let make_macro_api ctx p =
 			| CompilationServer.MacroContext -> add_macro ctx
 			| CompilationServer.NormalAndMacroContext -> add ctx; add_macro ctx;
 		);
-		MacroApi.on_reuse = (fun f ->
-			macro_interp_on_reuse := f :: !macro_interp_on_reuse
-		);
 		MacroApi.decode_expr = Interp.decode_expr;
 		MacroApi.encode_expr = Interp.encode_expr;
 		MacroApi.encode_ctype = Interp.encode_ctype;
@@ -399,8 +396,6 @@ let rec init_macro_interp ctx mctx mint =
 	Interp.init mint;
 	if !macro_enable_cache && not (Common.defined mctx.com Define.NoMacroCache) then begin
 		macro_interp_cache := Some mint;
-		macro_interp_on_reuse := [];
-		macro_interp_reused := true;
 	end
 
 and flush_macro_context mint ctx =
@@ -410,26 +405,6 @@ and flush_macro_context mint ctx =
 	let _, types, modules = ctx.g.do_generate mctx in
 	mctx.com.types <- types;
 	mctx.com.Common.modules <- modules;
-	let check_reuse() =
-		if !macro_interp_reused then
-			true
-		else if not (List.for_all (fun f -> f())  !macro_interp_on_reuse) then
-			false
-		else begin
-			macro_interp_reused := true;
-			true;
-		end
-	in
-	(* if one of the type we are using has been modified, we need to create a new macro context from scratch *)
-	let mint = if not (Interp.can_reuse mint types && check_reuse()) then begin
-		let com2 = mctx.com in
-		let mint = Interp.create com2 (make_macro_api ctx Globals.null_pos) true in
-		let macro = ((fun() -> Interp.select mint), mctx) in
-		ctx.g.macros <- Some macro;
-		mctx.g.macros <- Some macro;
-		init_macro_interp ctx mctx mint;
-		mint
-	end else mint in
 	(* we should maybe ensure that all filters in Main are applied. Not urgent atm *)
 	let expr_filters = [VarLazifier.apply mctx.com;AbstractCast.handle_abstract_casts mctx; CapturedVars.captured_vars mctx.com;] in
 
@@ -468,7 +443,6 @@ let create_macro_interp ctx mctx =
 			Interp.select mint;
 			mint, (fun() -> init_macro_interp ctx mctx mint)
 		| Some mint ->
-			macro_interp_reused := false;
 			Interp.do_reuse mint (make_macro_api ctx null_pos);
 			mint, (fun() -> ())
 	) in
@@ -663,11 +637,23 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 				| _ -> ());
 				e
 			with Error (Custom _,_) ->
-				(* if it's not a constant, let's make something that is typed as haxe.macro.Expr - for nice error reporting *)
-				(EBlock [
-					(EVars [("__tmp",null_pos),false,Some (CTPath ctexpr,p),Some (EConst (Ident "null"),p)],p);
-					(EConst (Ident "__tmp"),p);
-				],p)
+				let has_display e =
+					let rec loop e = match fst e with
+						| EDisplay _ -> raise Exit
+						| _ -> Ast.iter_expr loop e
+					in
+					try
+						loop e;
+						false
+					with Exit ->
+						true
+				in
+				if has_display e then
+					(* if the expression has EDisplay, pass it through as-is and hope that unify_call_args deals with it (issue #7699) *)
+					e
+				else
+					(* if it's not a constant, let's make something that is typed as haxe.macro.Expr - for nice error reporting *)
+					(ECheckType((EConst (Ident "null"),p),(CTPath ctexpr,p)),p)
 			) in
 			(* let's track the index by doing [e][index] (we will keep the expression type this way) *)
 			incr index;
@@ -711,7 +697,7 @@ let type_macro ctx mode cpath f (el:Ast.expr list) p =
 				| MExpr | MDisplay -> Interp.decode_expr v
 				| MBuild ->
 					let fields = if v = Interp.vnull then
-							(match ctx.g.get_build_infos() with
+							(match ctx.get_build_infos() with
 							| None -> assert false
 							| Some (_,_,fields) -> fields)
 						else

@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -190,7 +190,7 @@ let emit_try exec catches env =
 		eval.environment_offset <- environment_offset;
 		let exec,_,varacc =
 			try
-				List.find (fun (_,path,i) -> is v path) catches
+				List.find (fun (_,path,i) -> path = key_Dynamic || is v path) catches
 			with Not_found ->
 				raise_notrace exc
 		in
@@ -220,8 +220,9 @@ let emit_throw exec p env = throw (exec env) p
 
 let emit_safe_cast exec t p env =
 	let v1 = exec env in
-	if not (is v1 t) then throw_string "Class cast error" p;
-	v1
+	match vresolve v1 with
+	| VNull -> v1
+	| _ -> if not (is v1 t) then throw_string "Class cast error" p else v1
 
 (* Calls *)
 

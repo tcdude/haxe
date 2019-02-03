@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -134,7 +134,8 @@ let maybe_type_against_enum ctx f with_type iscall p =
 				| AKExpr e ->
 					begin match follow e.etype with
 						| TFun(_,t') when is_enum ->
-							unify ctx t' t e.epos;
+							(* TODO: this is a dodge for #7603 *)
+							(try Type.unify t' t with Unify_error _ -> ());
 							AKExpr e
 						| _ ->
 							if iscall then
@@ -2009,11 +2010,12 @@ and type_local_function ctx name inline f with_type p =
 		let is_rec = (try local_usage loop e; false with Exit -> true) in
 		let decl = (if is_rec then begin
 			if inline then display_error ctx "Inline function cannot be recursive" e.epos;
-			let e = (mk (TBlock [
-				mk (TVar (v,Some (mk (TConst TNull) ft p))) ctx.t.tvoid p;
-				mk (TBinop (OpAssign,mk (TLocal v) ft p,e)) ft p;
-				mk (TLocal v) ft p
-			]) ft p) in
+			let el =
+				(mk (TVar (v,Some (mk (TConst TNull) ft p))) ctx.t.tvoid p) ::
+				(mk (TBinop (OpAssign,mk (TLocal v) ft p,e)) ft p) ::
+				(if with_type = WithType.NoValue then [] else [mk (TLocal v) ft p])
+			in
+			let e = mk (TBlock el) ft p in
 			{e with eexpr = TMeta((Meta.MergeBlock,[],null_pos),e)}
 		end else if inline && not ctx.com.display.dms_display then
 			mk (TBlock []) ctx.t.tvoid p (* do not add variable since it will be inlined *)
@@ -2214,6 +2216,9 @@ and type_meta ctx m e1 with_type p =
 			ctx.meta <- List.filter (fun(m,_,_) -> m <> Meta.PrivateAccess) ctx.meta;
 			e()
 		| (Meta.Fixed,_,_) when ctx.com.platform=Cpp ->
+			let e = e() in
+			{e with eexpr = TMeta(m,e)}
+		| (Meta.NullSafety, [(EConst (Ident "false"), _)],_) ->
 			let e = e() in
 			{e with eexpr = TMeta(m,e)}
 		| (Meta.Inline,_,_) ->
@@ -2482,7 +2487,6 @@ let rec create com =
 			debug_delayed = [];
 			doinline = com.display.dms_inline && not (Common.defined com Define.NoInline);
 			hook_generate = [];
-			get_build_infos = (fun() -> None);
 			std = null_module;
 			global_using = [];
 			do_inherit = MagicTypes.on_inherit;
@@ -2516,6 +2520,7 @@ let rec create com =
 		curfun = FunStatic;
 		in_loop = false;
 		in_display = false;
+		get_build_infos = (fun() -> None);
 		in_macro = Common.defined com Define.Macro;
 		ret = mk_mono();
 		locals = PMap.empty;

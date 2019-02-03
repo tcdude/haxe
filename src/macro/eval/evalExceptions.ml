@@ -1,6 +1,6 @@
 (*
 	The Haxe Compiler
-	Copyright (C) 2005-2018  Haxe Foundation
+	Copyright (C) 2005-2019  Haxe Foundation
 
 	This program is free software; you can redistribute it and/or
 	modify it under the terms of the GNU General Public License
@@ -30,7 +30,9 @@ exception Return of value
 exception Sys_exit of int
 
 let is v path =
-	path = key_Dynamic || match v with
+	if path = key_Dynamic then
+		v <> vnull
+	else match v with
 	| VInt32 _ -> path = key_Int || path = key_Float
 	| VFloat f -> path = key_Float || (path = key_Int && f = (float_of_int (int_of_float f)) && f <= 2147483647. && f >= -2147483648.)
 	| VTrue | VFalse -> path = key_Bool
