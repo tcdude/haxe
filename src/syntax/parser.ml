@@ -27,9 +27,11 @@ type error_msg =
 	| Unexpected of token
 	| Duplicate_default
 	| Missing_semicolon
-	| Unclosed_macro
+	| Unclosed_conditional
 	| Unimplemented
 	| Missing_type
+	| Expected of string list
+	| StreamError of string
 	| Custom of string
 
 type decl_flag =
@@ -57,16 +59,29 @@ let error_msg = function
 	| Unexpected t -> "Unexpected "^(s_token t)
 	| Duplicate_default -> "Duplicate default"
 	| Missing_semicolon -> "Missing ;"
-	| Unclosed_macro -> "Unclosed macro"
+	| Unclosed_conditional -> "Unclosed conditional compilation block"
 	| Unimplemented -> "Not implemented for current platform"
 	| Missing_type -> "Missing type declaration"
+	| Expected sl -> "Expected " ^ (String.concat " or " sl)
+	| StreamError s -> s
 	| Custom s -> s
+
+type parse_data = string list * (type_def * pos) list
+
+type parse_error = (error_msg * pos)
+
+type 'a parse_result =
+	(* Parsed display file. There can be errors. *)
+	| ParseDisplayFile of 'a * parse_error list
+	(* Parsed non-display-file without errors. *)
+	| ParseSuccess of 'a
+	(* Parsed non-display file with errors *)
+	| ParseError of 'a * parse_error * parse_error list
 
 let syntax_completion kind p =
 	raise (SyntaxCompletion(kind,p))
 
 let error m p = raise (Error (m,p))
-let display_error : (error_msg -> pos -> unit) ref = ref (fun _ _ -> assert false)
 
 let special_identifier_files : (string,string) Hashtbl.t = Hashtbl.create 0
 
@@ -95,6 +110,22 @@ module TokenCache = struct
 		(fun () -> cache := old_cache)
 end
 
+let last_token s =
+	let n = Stream.count s in
+	TokenCache.get (if n = 0 then 0 else n - 1)
+
+let last_pos s = pos (last_token s)
+
+let next_token s = match Stream.peek s with
+	| Some (Eof,p) ->
+		(Eof,{p with pmax = max_int})
+	| Some tk -> tk
+	| None ->
+		let last_pos = pos (last_token s) in
+		(Eof,{last_pos with pmax = max_int})
+
+let next_pos s = pos (next_token s)
+
 (* Global state *)
 
 let in_display = ref false
@@ -109,7 +140,7 @@ let reset_state () =
 	in_display := false;
 	was_auto_triggered := false;
 	display_mode := DMNone;
-	display_position := null_pos;
+	display_position#reset;
 	in_macro := false;
 	had_resume := false;
 	code_ref := Sedlexing.Utf8.from_string "";
@@ -119,12 +150,23 @@ let reset_state () =
 
 let in_display_file = ref false
 let last_doc : (string * int) option ref = ref None
+let syntax_errors = ref []
 
-let last_token s =
-	let n = Stream.count s in
-	TokenCache.get (if n = 0 then 0 else n - 1)
+let syntax_error error_msg ?(pos=None) s v =
+	let p = (match pos with Some p -> p | None -> next_pos s) in
+	let p = if p.pmax = max_int then {p with pmax = p.pmin + 1} else p in
+	if not !in_display then error error_msg p;
+	syntax_errors := (error_msg,p) :: !syntax_errors;
+	v
 
-let last_pos s = pos (last_token s)
+let handle_stream_error msg s =
+	let err,pos = if msg = "" then begin
+		let tk,pos = next_token s in
+		(Unexpected tk),Some pos
+	end else
+		(StreamError msg),None
+	in
+	syntax_error err ~pos s ()
 
 let get_doc s =
 	(* do the peek first to make sure we fetch the doc *)
@@ -151,11 +193,11 @@ let type_path sl in_import p = match sl with
 
 let would_skip_display_position p1 s =
 	if !in_display_file then match Stream.npeek 1 s with
-		| [ (_,p2) ] -> encloses_display_position (punion p1 p2)
+		| [ (_,p2) ] -> display_position#enclosed_in (punion p1 p2)
 		| _ -> false
 	else false
 
-let cut_pos_at_display p = { p with pmax = !display_position.pmax }
+let cut_pos_at_display p = display_position#cut p
 
 let is_dollar_ident e = match fst e with
 	| EConst (Ident n) when starts_with n '$' ->
@@ -224,27 +266,13 @@ let make_is e (t,p_t) p p_is =
 	let e2 = expr_of_type_path (t.tpackage,t.tname) p_t in
 	ECall(e_is,[e;e2]),p
 
-let handle_xml_literal p1 (name,pi) =
-	if p1.pmax <> pi.pmin then error (Custom("Unexpected <")) p1;
-	let open_tag = "<" ^ name in
-	let close_tag = "</" ^ name ^ ">" in
+let handle_xml_literal p1 =
 	Lexer.reset();
-	Buffer.add_string Lexer.buf ("<" ^ name);
-	let i = Lexer.lex_xml p1.pmin open_tag close_tag !code_ref in
+	let i = Lexer.lex_xml p1.pmin !code_ref in
 	let xml = Lexer.contents() in
 	let e = EConst (String xml),{p1 with pmax = i} in
 	let e = make_meta Meta.Markup [] e p1 in
 	e
-
-let next_token s = match Stream.peek s with
-	| Some (Eof,p) ->
-		(Eof,{p with pmax = max_int})
-	| Some tk -> tk
-	| None ->
-		let last_pos = pos (last_token s) in
-		(Eof,{last_pos with pmax = max_int})
-
-let next_pos s = pos (next_token s)
 
 let punion_next p1 s =
 	let _,p2 = next_token s in
@@ -265,7 +293,7 @@ let is_signature_display () =
 	!display_mode = DMSignature
 
 let check_resume p fyes fno =
-	if is_completion () && !in_display_file && p.pmax = !display_position.pmin then begin
+	if is_completion () && !in_display_file && p.pmax = (display_position#get).pmin then begin
 		had_resume := true;
 		fyes()
 	end else
@@ -274,7 +302,7 @@ let check_resume p fyes fno =
 let check_resume_range p s fyes fno =
 	if is_completion () && !in_display_file then begin
 		let pnext = next_pos s in
-		if p.pmin < !display_position.pmin && pnext.pmin >= !display_position.pmax then
+		if p.pmin < (display_position#get).pmin && pnext.pmin >= (display_position#get).pmax then
 			fyes pnext
 		else
 			fno()
@@ -282,7 +310,7 @@ let check_resume_range p s fyes fno =
 		fno()
 
 let check_type_decl_flag_completion mode flags s =
-	if not !in_display_file then raise Stream.Failure;
+	if not !in_display_file || not (is_completion()) then raise Stream.Failure;
 	let check_type_completion () = match Stream.peek s with
 		(* If there's an identifier coming up, it's probably an incomplete type
 			declaration. Let's just raise syntax completion in that case because
@@ -300,14 +328,14 @@ let check_type_decl_flag_completion mode flags s =
 		check_type_completion()
 
 let check_type_decl_completion mode pmax s =
-	if !in_display_file then begin
+	if !in_display_file && is_completion() then begin
 		let pmin = match Stream.peek s with
 			| Some (Eof,_) | None -> max_int
 			| Some tk -> (pos tk).pmin
 		in
 		(* print_endline (Printf.sprintf "(%i <= %i) (%i >= %i)" pmax !display_position.pmin pmin !display_position.pmax); *)
-		if pmax <= !display_position.pmin && pmin >= !display_position.pmax then
-			delay_syntax_completion (SCTypeDecl mode) !display_position
+		if pmax <= (display_position#get).pmin && pmin >= (display_position#get).pmax then
+			delay_syntax_completion (SCTypeDecl mode) display_position#get
 	end
 
 let check_signature_mark e p1 p2 =
@@ -315,10 +343,10 @@ let check_signature_mark e p1 p2 =
 	else begin
 		let p = punion p1 p2 in
 		if true || not !was_auto_triggered then begin (* TODO: #6383 *)
-			if encloses_position_gt !display_position p then (mk_display_expr e DKMarked)
+			if encloses_position_gt display_position#get p then (mk_display_expr e DKMarked)
 			else e
 		end else begin
-			if !display_position.pmin = p1.pmax then (mk_display_expr e DKMarked)
+			if (display_position#get).pmin = p1.pmax then (mk_display_expr e DKMarked)
 			else e
 		end
 	end

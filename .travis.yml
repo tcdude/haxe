@@ -35,14 +35,13 @@ dist: trusty
 install_linux: &install_linux
   # Install dependencies
   - export APT_CACHE_DIR=~/apt-cache && mkdir -pv $APT_CACHE_DIR
-  - sudo apt-get install --reinstall ca-certificates # workaround for "Cannot add PPA: 'ppa:haxe/ocaml'. Please check that the PPA name or format is correct."
-  - sudo add-apt-repository ppa:haxe/ocaml -y
+  - sudo apt-get install --reinstall ca-certificates # workaround for "Cannot add PPA: 'ppa:...'. Please check that the PPA name or format is correct."
+  - sudo add-apt-repository ppa:avsm/ppa -y # provides newer version of OCaml and OPAM
   - sudo apt-get update -y
   - sudo apt-get -o dir::cache::archives="$APT_CACHE_DIR" install -y
-      ocaml
-      ocaml-native-compilers
-      ocaml-findlib
-      aspcud
+      ocaml-nox
+      camlp4-extra
+      opam
       libpcre3-dev
       zlib1g-dev
       libgtk2.0-dev
@@ -81,13 +80,16 @@ install_linux: &install_linux
   - jdk_switcher use oraclejdk7
   - java -version
   # ocaml dependencies
-  - wget -nv https://raw.github.com/ocaml/opam/master/shell/opam_installer.sh -O - | sh -s /usr/local/bin system
+  - opam init
   - opam update
   - opam pin add haxe . --no-action
   - opam install haxe --deps-only
+  - opam list
+  - ocamlopt -v
   # Build haxe
   - make package_src -s
   - opam config exec -- make -s STATICLINK=1 libs
+  - opam config exec -- make -s STATICLINK=1 prebuild
   - opam config exec -- make -s -j STATICLINK=1 haxe
   - opam config exec -- make -s haxelib
   - make package_bin -s
@@ -100,7 +102,7 @@ install_linux: &install_linux
 install_osx: &install_osx
   - (nvm ls 8 || nvm install 8) && nvm use 8
   # Install dependencies
-  - travis_retry brew update --merge
+  - travis_retry brew update
   - brew uninstall --force brew-cask # https://github.com/caskroom/homebrew-cask/pull/15381
   - travis_retry brew bundle --file=tests/Brewfile --no-upgrade
   # install neko
@@ -135,8 +137,11 @@ install_osx: &install_osx
   - opam update
   - opam pin add haxe . --no-action
   - opam install haxe --deps-only
+  - opam list
+  - ocamlopt -v
   # Build haxe
   - make -s STATICLINK=1 "LIB_PARAMS=/usr/local/opt/zlib/lib/libz.a /usr/local/lib/libpcre.a" libs
+  - make -s STATICLINK=1 "LIB_PARAMS=/usr/local/opt/zlib/lib/libz.a /usr/local/lib/libpcre.a" prebuild
   - make -s -j STATICLINK=1 "LIB_PARAMS=/usr/local/opt/zlib/lib/libz.a /usr/local/lib/libpcre.a" haxe
   - make -s haxelib
   - make package_bin -s
@@ -168,7 +173,7 @@ matrix:
 
     - os: linux
       env:
-        - TEST=macro,hl,js,php,flash9,as3,java,cs,python,lua
+        - TEST=macro,hl,js,php,flash9,as3,java,jvm,cs,python,lua
         - SAUCE=1
       addons:
         sauce_connect: true
@@ -199,7 +204,7 @@ matrix:
     - os: osx
       osx_image: xcode9.4 # to compile faster
       env:
-        - TEST=macro,hl,java,cs,lua,js,php,flash9,python
+        - TEST=macro,hl,java,jvm,cs,lua,js,php,flash9,python
       install: *install_osx
 
     - os: osx

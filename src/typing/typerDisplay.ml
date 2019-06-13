@@ -48,7 +48,7 @@ let completion_item_of_expr ctx e =
 	let rec loop e = match e.eexpr with
 		| TLocal v | TVar(v,_) -> make_ci_local v (tpair ~values:(get_value_meta v.v_meta) v.v_type)
 		| TField(e1,FStatic(c,cf)) ->
-			merge_core_doc ctx (TClassDecl c);
+			Display.merge_core_doc ctx (TClassDecl c);
 			let decl = decl_of_class c in
 			let origin = match c.cl_kind,e1.eexpr with
 				| KAbstractImpl _,_ when Meta.has Meta.Impl cf.cf_meta -> Self decl
@@ -61,7 +61,7 @@ let completion_item_of_expr ctx e =
 			in
 			of_field e origin cf CFSStatic make_ci
 		| TField(e1,(FInstance(c,_,cf) | FClosure(Some(c,_),cf))) ->
-			merge_core_doc ctx (TClassDecl c);
+			Display.merge_core_doc ctx (TClassDecl c);
 			let origin = match follow e1.etype with
 			| TInst(c',_) when c != c' ->
 				Parent (TClassDecl c)
@@ -81,12 +81,12 @@ let completion_item_of_expr ctx e =
 				| _ -> itexpr e
 			end
 		| TTypeExpr (TClassDecl {cl_kind = KAbstractImpl a}) ->
-			merge_core_doc ctx (TAbstractDecl a);
+			Display.merge_core_doc ctx (TAbstractDecl a);
 			let t = TType(abstract_module_type a (List.map snd a.a_params),[]) in
 			let t = tpair t in
 			make_ci_type (CompletionModuleType.of_module_type (TAbstractDecl a)) ImportStatus.Imported (Some t)
 		| TTypeExpr mt ->
-			merge_core_doc ctx mt;
+			Display.merge_core_doc ctx mt;
 			let t = tpair e.etype in
 			make_ci_type (CompletionModuleType.of_module_type mt) ImportStatus.Imported (Some t) (* TODO *)
 		| TConst (TThis | TSuper) -> itexpr e (* TODO *)
@@ -97,7 +97,7 @@ let completion_item_of_expr ctx e =
 				| _ -> itexpr e
 			end
 		| TNew(c,tl,_) ->
-			merge_core_doc ctx (TClassDecl c);
+			Display.merge_core_doc ctx (TClassDecl c);
 			(* begin match fst e_ast with
 			| EConst (Regexp (r,opt)) ->
 				let present,absent = List.partition (String.contains opt) ['g';'i';'m';'s';'u'] in
@@ -125,7 +125,8 @@ let completion_item_of_expr ctx e =
 			(* end *)
 		| TCall({eexpr = TConst TSuper; etype = t} as e1,_) ->
 			itexpr e1 (* TODO *)
-		| TParenthesis e1 | TMeta(_,e1) | TCast(e1,_) -> loop e1
+		| TCast(e1,_) -> loop {e1 with etype = e.etype}
+		| TParenthesis e1 | TMeta(_,e1) -> loop e1
 		| _ -> itexpr e
 	in
 	loop e
@@ -195,6 +196,7 @@ let rec handle_signature_display ctx e_ast with_type =
 			in
 			[loop tl,None,PMap.empty]
 		| TInst (c,tl) | TAbstract({a_impl = Some c},tl) ->
+			Display.merge_core_doc ctx (TClassDecl c);
 			let ct,cf = get_constructor ctx c tl p in
 			let tl = (ct,cf.cf_doc,get_value_meta cf.cf_meta) :: List.rev_map (fun cf' -> cf'.cf_type,cf.cf_doc,get_value_meta cf'.cf_meta) cf.cf_overloads in
 			tl
@@ -369,18 +371,43 @@ and display_expr ctx e_ast e dk with_type p =
 	| DMTypeDefinition ->
 		raise_position_of_type e.etype
 	| DMDefault when not (!Parser.had_resume)->
+		let display_fields e_ast e l =
+			let fields = DisplayFields.collect ctx e_ast e dk with_type p in
+			let item = completion_item_of_expr ctx e in
+			raise_fields fields (CRField(item,e.epos,None,None)) (Some {e.epos with pmin = e.epos.pmax - l;})
+		in
 		begin match fst e_ast,e.eexpr with
 			| EField(e1,s),TField(e2,_) ->
-				let fields = DisplayFields.collect ctx e1 e2 dk with_type p in
-				let item = completion_item_of_expr ctx e2 in
-				raise_fields fields (CRField(item,e2.epos)) (Some {e.epos with pmin = e.epos.pmax - String.length s;})
+				display_fields e1 e2 (String.length s)
 			| _ ->
-				raise_toplevel ctx dk with_type None p
+				if dk = DKDot then display_fields e_ast e 0
+				else raise_toplevel ctx dk with_type None p
 		end
 	| DMDefault | DMNone | DMModuleSymbols _ | DMDiagnostics _ | DMStatistics ->
 		let fields = DisplayFields.collect ctx e_ast e dk with_type p in
 		let item = completion_item_of_expr ctx e in
-		raise_fields fields (CRField(item,e.epos)) None
+		let iterator = try
+			let it = (ForLoop.IterationKind.of_texpr ~resume:true ctx e (fun _ -> false) e.epos) in
+			match follow it.it_type with
+				| TDynamic _ ->  None
+				| t -> Some t
+			with Error _ | Not_found ->
+				None
+		in
+		let keyValueIterator =
+			try begin
+				let _,pt = ForLoop.IterationKind.check_iterator ~resume:true ctx "keyValueIterator" e e.epos in
+				match follow pt with
+					| TAnon a ->
+						let key = PMap.find "key" a.a_fields in
+						let value = PMap.find "value" a.a_fields in
+						Some (key.cf_type,value.cf_type)
+					| _ ->
+						None
+			end with Error _ | Not_found ->
+				None
+		in
+		raise_fields fields (CRField(item,e.epos,iterator,keyValueIterator)) None
 
 let handle_structure_display ctx e fields origin =
 	let p = pos e in
@@ -418,23 +445,29 @@ let handle_display ctx e_ast dk with_type =
 		let mono = mk_mono() in
 		let doc = Some "Outputs type of argument as a warning and uses argument as value" in
 		let arg = ["expression",false,mono] in
+		let p = pos e_ast in
 		begin match ctx.com.display.dms_kind with
 		| DMSignature ->
 			raise_signatures [(convert_function_signature ctx PMap.empty (arg,mono),doc)] 0 0 SKCall
-		| _ ->
+		| DMHover ->
 			let t = TFun(arg,mono) in
-			raise_hover (make_ci_expr (mk (TIdent "trace") t (pos e_ast)) (tpair t)) (Some (WithType.named_argument "expression")) (pos e_ast);
+			raise_hover (make_ci_expr (mk (TIdent "trace") t p) (tpair t)) (Some (WithType.named_argument "expression")) p
+		| _ ->
+			error "Unsupported method" p
 		end
 	| (EConst (Ident "trace"),_),_ ->
 		let doc = Some "Print given arguments" in
 		let arg = ["value",false,t_dynamic] in
 		let ret = ctx.com.basic.tvoid in
+		let p = pos e_ast in
 		begin match ctx.com.display.dms_kind with
 		| DMSignature ->
 			raise_signatures [(convert_function_signature ctx PMap.empty (arg,ret),doc)] 0 0 SKCall
-		| _ ->
+		| DMHover ->
 			let t = TFun(arg,ret) in
-			raise_hover (make_ci_expr (mk (TIdent "trace") t (pos e_ast)) (tpair t)) (Some (WithType.named_argument "value")) (pos e_ast);
+			raise_hover (make_ci_expr (mk (TIdent "trace") t p) (tpair t)) (Some (WithType.named_argument "value")) p
+		| _ ->
+			error "Unsupported method" p
 		end
 	| (EConst (Ident "_"),p),WithType.WithType(t,_) ->
 		mk (TConst TNull) t p (* This is "probably" a bind skip, let's just use the expected type *)
@@ -445,7 +478,7 @@ let handle_display ctx e_ast dk with_type =
 		else raise_toplevel ctx dk with_type (Some p) p
 	| Error ((Type_not_found (path,_) | Module_not_found path),_) as err when ctx.com.display.dms_kind = DMDefault ->
 		if ctx.com.json_out = None then	begin try
-			raise_fields (DisplayFields.get_submodule_fields ctx path) (CRField((make_ci_module path),p)) None
+			raise_fields (DisplayFields.get_submodule_fields ctx path) (CRField((make_ci_module path),p,None,None)) None
 		with Not_found ->
 			raise err
 		end else
@@ -488,7 +521,7 @@ let handle_display ctx e_ast dk with_type =
 						false
 					end
 				end
-			| ITTypeParameter {cl_kind = KTypeParameter tl} when has_constructible_constraint ctx tl [] null_pos ->
+			| ITTypeParameter {cl_kind = KTypeParameter tl} when get_constructible_constraint ctx tl null_pos <> None ->
 				true
 			| _ -> false
 		) l in

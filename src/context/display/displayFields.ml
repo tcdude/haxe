@@ -70,7 +70,7 @@ let collect_static_extensions ctx items e p =
 								acc
 							else begin
 								let f = prepare_using_field f in
-								let f = { f with cf_params = []; cf_public = true; cf_type = TFun(args,ret) } in
+								let f = { f with cf_params = []; cf_flags = set_flag f.cf_flags (int_of_class_field_flag CfPublic); cf_type = TFun(args,ret) } in
 								let decl = match c.cl_kind with
 									| KAbstractImpl a -> TAbstractDecl a
 									| _ -> TClassDecl c
@@ -107,7 +107,7 @@ let collect ctx e_ast e dk with_type p =
 	let opt_args args ret = TFun(List.map(fun (n,o,t) -> n,true,t) args,ret) in
 	let should_access c cf stat =
 		if Meta.has Meta.NoCompletion cf.cf_meta then false
-		else if c != ctx.curclass && not cf.cf_public && String.length cf.cf_name > 4 then begin match String.sub cf.cf_name 0 4 with
+		else if c != ctx.curclass && not (has_class_field_flag cf CfPublic) && String.length cf.cf_name > 4 then begin match String.sub cf.cf_name 0 4 with
 			| "get_" | "set_" -> false
 			| _ -> can_access ctx c cf stat
 		end else
@@ -127,7 +127,7 @@ let collect ctx e_ast e dk with_type p =
 		| TInst(c0,tl) ->
 			(* For classes, browse the hierarchy *)
 			let fields = TClass.get_all_fields c0 tl in
-			merge_core_doc ctx (TClassDecl c0);
+			Display.merge_core_doc ctx (TClassDecl c0);
 			PMap.foldi (fun k (c,cf) acc ->
 				if should_access c cf false && is_new_item acc cf.cf_name then begin
 					let origin = if c == c0 then Self(TClassDecl c) else Parent(TClassDecl c) in
@@ -151,7 +151,7 @@ let collect ctx e_ast e dk with_type p =
 				items
 			end;
 		| TAbstract({a_impl = Some c} as a,tl) ->
-			merge_core_doc ctx (TAbstractDecl a);
+			Display.merge_core_doc ctx (TAbstractDecl a);
 			(* Abstracts should show all their @:impl fields minus the constructor. *)
 			let items = List.fold_left (fun acc cf ->
 				if Meta.has Meta.Impl cf.cf_meta && not (Meta.has Meta.Enum cf.cf_meta) && should_access c cf false && is_new_item acc cf.cf_name then begin
@@ -181,7 +181,26 @@ let collect ctx e_ast e dk with_type p =
 				items
 			end
 		| TAnon an ->
-			(* Anons only have their own fields. *)
+			(* @:forwardStatics *)
+			let items = match !(an.a_status) with
+				| Statics { cl_kind = KAbstractImpl { a_meta = meta; a_this = TInst (c,_) }} when Meta.has Meta.ForwardStatics meta ->
+					let items = List.fold_left (fun acc cf ->
+						if should_access c cf true && is_new_item acc cf.cf_name then begin
+							let origin = Self(TClassDecl c) in
+							let item = make_class_field origin cf in
+							PMap.add cf.cf_name item acc
+						end else
+							acc
+					) items c.cl_ordered_statics in
+					PMap.foldi (fun name item acc ->
+						if is_new_item acc name then
+							PMap.add name item acc
+						else
+							acc
+					) PMap.empty items
+				| _ -> items
+			in
+			(* Anon own fields *)
 			PMap.foldi (fun name cf acc ->
 				if is_new_item acc name then begin
 					let allow_static_abstract_access c cf =
@@ -204,13 +223,13 @@ let collect ctx e_ast e dk with_type p =
 							else
 								acc;
 						| Statics c ->
-							merge_core_doc ctx (TClassDecl c);
+							Display.merge_core_doc ctx (TClassDecl c);
 							if should_access c cf true then add (Self (TClassDecl c)) make_ci_class_field else acc;
 						| EnumStatics en ->
 							let ef = PMap.find name en.e_constrs in
 							PMap.add name (make_ci_enum_field (CompletionEnumField.make ef (Self (TEnumDecl en)) true) (cf.cf_type,ct)) acc
 						| AbstractStatics a ->
-							merge_core_doc ctx (TAbstractDecl a);
+							Display.merge_core_doc ctx (TAbstractDecl a);
 							let check = match a.a_impl with
 								| None -> true
 								| Some c -> allow_static_abstract_access c cf

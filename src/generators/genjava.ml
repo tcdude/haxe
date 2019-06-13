@@ -1929,13 +1929,13 @@ let generate con =
 				end (* TODO see how (get,set) variable handle when they are interfaces *)
 			| Method _ when not (Type.is_physical_field cf) || (match cl.cl_kind, cf.cf_expr with | KAbstractImpl _, None -> true | _ -> false) ->
 				List.iter (fun cf -> if cl.cl_interface || cf.cf_expr <> None then
-					gen_class_field w ~is_overload:true is_static cl cf.cf_final cf
+					gen_class_field w ~is_overload:true is_static cl (has_class_field_flag cf CfFinal) cf
 				) cf.cf_overloads
 			| Var _ | Method MethDynamic -> ()
 			| Method mkind ->
 				List.iter (fun cf ->
 					if cl.cl_interface || cf.cf_expr <> None then
-						gen_class_field w ~is_overload:true is_static cl cf.cf_final cf
+						gen_class_field w ~is_overload:true is_static cl (has_class_field_flag cf CfFinal) cf
 				) cf.cf_overloads;
 				let is_virtual = is_new || (not is_final && match mkind with | MethInline -> false | _ when not is_new -> true | _ -> false) in
 				let is_override = match cf.cf_name with
@@ -2149,6 +2149,8 @@ let generate con =
 								| _ -> ()
 				with | Not_found -> ()
 				);
+				write w "haxe.java.Init.init();";
+				newline w;
 				(match gen.gcon.main with
 					| Some(expr) ->
 						expr_s w (mk_block expr)

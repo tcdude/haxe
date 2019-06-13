@@ -113,6 +113,19 @@ let rec keep_field dce cf c is_static =
 			| Some ({ cl_constructor = Some ctor } as csup, _) -> keep_field dce ctor csup false
 			| _ -> false
 	)
+	|| begin
+		let check_accessor prefix =
+			try
+				let fields = if is_static then c.cl_statics else c.cl_fields in
+				let accessor = PMap.find (prefix ^ cf.cf_name) fields in
+				keep_field dce accessor c is_static
+			with Not_found -> false
+		in
+		match cf.cf_kind with
+		| Var { v_read = AccCall } -> check_accessor "get_"
+		| Var { v_write = AccCall } -> check_accessor "set_"
+		| _ -> false
+	end
 
 (* marking *)
 
@@ -189,11 +202,7 @@ end
 
 let rec mark_enum dce e = if not (Meta.has Meta.Used e.e_meta) then begin
 	e.e_meta <- (Meta.Used,[],e.e_pos) :: e.e_meta;
-
-	(* do not generate has_enum feature for @:fakeEnum enums since they are not really enums *)
-	if not (Meta.has Meta.FakeEnum e.e_meta) then
-		check_and_add_feature dce "has_enum";
-
+	check_and_add_feature dce "has_enum";
 	check_feature dce (Printf.sprintf "%s.*" (s_type_path e.e_path));
 	PMap.iter (fun _ ef -> mark_t dce ef.ef_pos ef.ef_type) e.e_constrs;
 end
@@ -429,11 +438,12 @@ and expr_field dce e fa is_call_expr =
 				check_and_add_feature dce "dynamic_read";
 				check_and_add_feature dce ("dynamic_read." ^ n);
 			| _ -> ());
-			begin match follow e.etype with
-				| TInst(c,_) ->
+			begin match follow e.etype, fa with
+				| TInst(c,_), _
+				| _, FClosure (Some (c, _), _) ->
 					mark_class dce c;
 					field dce c n false;
-				| TAnon a ->
+				| TAnon a, _ ->
 					(match !(a.a_status) with
 					| Statics c ->
 						mark_class dce c;
@@ -672,7 +682,10 @@ let fix_accessors com =
 	) com.types
 
 let collect_entry_points dce com =
-	List.iter (fun t -> match t with
+	List.iter (fun t ->
+		let mt = t_infos t in
+		mt.mt_meta <- Meta.remove Meta.Used mt.mt_meta;
+		match t with
 		| TClassDecl c ->
 			let keep_class = keep_whole_class dce c && (not c.cl_extern || c.cl_interface) in
 			let loop stat cf =
@@ -880,10 +893,5 @@ let run com main mode =
 	) com.types;
 
 	(* cleanup added fields metadata - compatibility with compilation server *)
-	let rec remove_meta m = function
-		| [] -> []
-		| (m2,_,_) :: l when m = m2 -> l
-		| x :: l -> x :: remove_meta m l
-	in
-	List.iter (fun cf -> cf.cf_meta <- remove_meta Meta.Used cf.cf_meta) dce.marked_fields;
-	List.iter (fun cf -> cf.cf_meta <- remove_meta Meta.MaybeUsed cf.cf_meta) dce.marked_maybe_fields
+	List.iter (fun cf -> cf.cf_meta <- Meta.remove Meta.Used cf.cf_meta) dce.marked_fields;
+	List.iter (fun cf -> cf.cf_meta <- Meta.remove Meta.MaybeUsed cf.cf_meta) dce.marked_maybe_fields

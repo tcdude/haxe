@@ -75,6 +75,8 @@ type typer_globals = {
 	mutable global_metadata : (string list * metadata_entry * (bool * bool * bool)) list;
 	mutable module_check_policies : (string list * module_check_policy list * bool) list;
 	mutable global_using : (tclass * pos) list;
+	(* Indicates that Typer.create() finished building this instance *)
+	mutable complete : bool;
 	(* api *)
 	do_inherit : typer -> Type.tclass -> pos -> (bool * placed_type_path) -> bool;
 	do_create : Common.context -> typer;
@@ -94,6 +96,7 @@ and typer = {
 	com : context;
 	t : basic_types;
 	g : typer_globals;
+	mutable bypass_accessor : int;
 	mutable meta : metadata;
 	mutable this_stack : texpr list;
 	mutable with_type_stack : WithType.t list;
@@ -132,7 +135,6 @@ let make_call_ref : (typer -> texpr -> texpr list -> t -> ?force_inline:bool -> 
 let type_expr_ref : (typer -> expr -> WithType.t -> texpr) ref = ref (fun _ _ _ -> assert false)
 let type_block_ref : (typer -> expr list -> WithType.t -> pos -> texpr) ref = ref (fun _ _ _ _ -> assert false)
 let unify_min_ref : (typer -> texpr list -> t) ref = ref (fun _ _ -> assert false)
-let get_pattern_locals_ref : (typer -> expr -> Type.t -> (string, tvar * pos) PMap.t) ref = ref (fun _ _ _ -> assert false)
 let analyzer_run_on_expr_ref : (Common.context -> texpr -> texpr) ref = ref (fun _ _ -> assert false)
 
 let pass_name = function
@@ -145,7 +147,7 @@ let pass_name = function
 
 let display_error ctx msg p = match ctx.com.display.DisplayMode.dms_error_policy with
 	| DisplayMode.EPShow | DisplayMode.EPIgnore -> ctx.on_error ctx msg p
-	| DisplayMode.EPCollect -> add_diagnostics_message ctx.com msg p DisplayTypes.DiagnosticsSeverity.Error
+	| DisplayMode.EPCollect -> add_diagnostics_message ctx.com msg p DisplayTypes.DiagnosticsKind.DKCompilerError DisplayTypes.DiagnosticsSeverity.Error
 
 let make_call ctx e el t p = (!make_call_ref) ctx e el t p
 
@@ -197,11 +199,14 @@ let save_locals ctx =
 
 let add_local ctx k n t p =
 	let v = alloc_var k n t p in
-	if Define.defined ctx.com.defines Define.WarnVarShadowing then begin
+	if Define.defined ctx.com.defines Define.WarnVarShadowing && n <> "_" then begin
 		try
 			let v' = PMap.find n ctx.locals in
-			ctx.com.warning "This variable shadows a previously declared variable" p;
-			ctx.com.warning "Previous variable was here" v'.v_pos
+			(* ignore std lib *)
+			if not (List.exists (ExtLib.String.starts_with p.pfile) ctx.com.std_path) then begin
+				ctx.com.warning "This variable shadows a previously declared variable" p;
+				ctx.com.warning "Previous variable was here" v'.v_pos
+			end
 		with Not_found ->
 			()
 	end;
@@ -308,7 +313,7 @@ let push_this ctx e = match e.eexpr with
 		er,fun () -> ctx.this_stack <- List.tl ctx.this_stack
 
 let is_removable_field ctx f =
-	f.cf_extern || Meta.has Meta.Generic f.cf_meta
+	has_class_field_flag f CfExtern || Meta.has Meta.Generic f.cf_meta
 	|| (match f.cf_kind with
 		| Var {v_read = AccRequire (s,_)} -> true
 		| Method MethMacro -> not ctx.in_macro
@@ -316,7 +321,7 @@ let is_removable_field ctx f =
 
 (** checks if we can access to a given class field using current context *)
 let rec can_access ctx ?(in_overload=false) c cf stat =
-	if cf.cf_public then
+	if (has_class_field_flag cf CfPublic) then
 		true
 	else if not in_overload && ctx.com.config.pf_overload && Meta.has Meta.Overload cf.cf_meta then
 		true
@@ -335,13 +340,22 @@ let rec can_access ctx ?(in_overload=false) c cf stat =
 		| EConst (Ident n) -> n :: acc
 		| _ -> []
 	in
-	let rec chk_path psub pfull =
+	let rec chk_path psub pfull is_current_path =
 		match psub, pfull with
 		| [], _ -> true
-		| a :: l1, b :: l2 when a = b -> chk_path l1 l2
+		| a :: l1, b :: l2 when a = b ->
+			if
+				(* means it's a path of a superclass or implemented interface *)
+				not is_current_path &&
+				(* it's the last part of path in a meta && it denotes a package *)
+				l1 = [] && not (StringHelper.starts_uppercase a)
+			then
+				false
+			else
+				chk_path l1 l2 is_current_path
 		| _ -> false
 	in
-	let has m c f path =
+	let has m c f (path,is_current_path) =
 		let rec loop = function
 			| (m2,el,_) :: l when m = m2 ->
 				List.exists (fun e ->
@@ -352,7 +366,7 @@ let rec can_access ctx ?(in_overload=false) c cf stat =
 						(match path with [_;_] -> true | _ -> false)
 					| _ ->
 						let p = expr_path [] e in
-						(p <> [] && chk_path p path)
+						(p <> [] && chk_path p path is_current_path)
 				) el
 				|| loop l
 			| _ :: l -> loop l
@@ -361,25 +375,28 @@ let rec can_access ctx ?(in_overload=false) c cf stat =
 		loop c.cl_meta || loop f.cf_meta
 	in
 	let cur_paths = ref [] in
-	let rec loop c =
-		cur_paths := make_path c ctx.curfield :: !cur_paths;
+	let rec loop c is_current_path =
+		cur_paths := (make_path c ctx.curfield, is_current_path) :: !cur_paths;
 		begin match c.cl_super with
-			| Some (csup,_) -> loop csup
+			| Some (csup,_) -> loop csup false
 			| None -> ()
 		end;
-		List.iter (fun (c,_) -> loop c) c.cl_implements;
+		List.iter (fun (c,_) -> loop c false) c.cl_implements;
 	in
-	loop ctx.curclass;
+	loop ctx.curclass true;
 	let is_constr = cf.cf_name = "new" in
 	let rec loop c =
 		try
-			has Meta.Access ctx.curclass ctx.curfield (make_path c cf)
+			has Meta.Access ctx.curclass ctx.curfield ((make_path c cf), true)
 			|| (
 				(* if our common ancestor declare/override the field, then we can access it *)
 				let allowed f = is_parent c ctx.curclass || (List.exists (has Meta.Allow c f) !cur_paths) in
 				if is_constr
 				then (match c.cl_constructor with
-					| Some cf -> if allowed cf then true else raise Not_found
+					| Some cf ->
+						if allowed cf then true
+						else if cf.cf_expr = None then false (* maybe it's an inherited auto-generated constructor *)
+						else raise Not_found
 					| _ -> false
 				)
 				else try allowed (PMap.find cf.cf_name (if stat then c.cl_statics else c.cl_fields)) with Not_found -> false
@@ -430,7 +447,7 @@ let merge_core_doc ctx mt =
 			| Some ({cf_doc = None} as cf),Some cf2 -> cf.cf_doc <- cf2.cf_doc
 			| _ -> ()
 		end
-	| _ -> ());
+	| _ -> ())
 
 (* -------------- debug functions to activate when debugging typer passes ------------------------------- *)
 (*/*
@@ -446,7 +463,12 @@ let context_ident ctx =
 		"  out "
 
 let debug ctx str =
-	if Common.raw_defined ctx.com "cdebug" then print_endline (context_ident ctx ^ string_of_int (String.length !delay_tabs) ^ " " ^ !delay_tabs ^ str)
+	if Common.raw_defined ctx.com "cdebug" then begin
+		let s = (context_ident ctx ^ string_of_int (String.length !delay_tabs) ^ " " ^ !delay_tabs ^ str) in
+		match ctx.com.json_out with
+		| None -> print_endline s
+		| Some _ -> DynArray.add ctx.com.pass_debug_messages s
+	end
 
 let init_class_done ctx =
 	debug ctx ("init_class_done " ^ s_type_path ctx.curclass.cl_path);
