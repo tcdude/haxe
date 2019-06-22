@@ -179,7 +179,6 @@ and texpr = {
 and tclass_field = {
 	mutable cf_name : string;
 	mutable cf_type : t;
-	mutable cf_public : bool;
 	cf_pos : pos;
 	cf_name_pos : pos;
 	mutable cf_doc : Ast.documentation;
@@ -189,8 +188,7 @@ and tclass_field = {
 	mutable cf_expr : texpr option;
 	mutable cf_expr_unoptimized : tfunc option;
 	mutable cf_overloads : tclass_field list;
-	mutable cf_extern : bool; (* this is only true if the field itself is extern, not its class *)
-	mutable cf_final : bool;
+	mutable cf_flags : int;
 }
 
 and tclass_kind =
@@ -381,6 +379,35 @@ type class_field_scope =
 	| CFSMember
 	| CFSConstructor
 
+type flag_tclass_field =
+	| CfPublic
+	| CfExtern (* This is only set if the field itself is extern, not just the class. *)
+	| CfFinal
+	| CfOverridden
+
+(* Flags *)
+
+let has_flag flags flag =
+	flags land (1 lsl flag) > 0
+
+let set_flag flags flag =
+	flags lor (1 lsl flag)
+
+let unset_flag flags flag =
+	flags land (lnot (1 lsl flag))
+
+let int_of_class_field_flag (flag : flag_tclass_field) =
+	Obj.magic flag
+
+let add_class_field_flag cf (flag : flag_tclass_field) =
+	cf.cf_flags <- set_flag cf.cf_flags (int_of_class_field_flag flag)
+
+let remove_class_field_flag cf (flag : flag_tclass_field) =
+	cf.cf_flags <- unset_flag cf.cf_flags (int_of_class_field_flag flag)
+
+let has_class_field_flag cf (flag : flag_tclass_field) =
+	has_flag cf.cf_flags (int_of_class_field_flag flag)
+
 (* ======= General utility ======= *)
 
 let alloc_var =
@@ -393,7 +420,7 @@ let alloc_var =
 			v_type = t;
 			v_id = !uid;
 			v_capture = false;
-			v_final = false;
+			v_final = (match kind with VUser TVOLocalFunction -> true | _ -> false);
 			v_extra = None;
 			v_meta = [];
 			v_pos = p
@@ -484,21 +511,19 @@ let module_extra file sign time kind policy =
 	}
 
 
-let mk_field name t p name_pos = {
+let mk_field name ?(public = true) t p name_pos = {
 	cf_name = name;
 	cf_type = t;
 	cf_pos = p;
 	cf_name_pos = name_pos;
 	cf_doc = None;
 	cf_meta = [];
-	cf_public = true;
 	cf_kind = Var { v_read = AccNormal; v_write = AccNormal };
 	cf_expr = None;
 	cf_expr_unoptimized = None;
 	cf_params = [];
 	cf_overloads = [];
-	cf_extern = false;
-	cf_final = false;
+	cf_flags = if public then set_flag 0 (int_of_class_field_flag CfPublic) else 0;
 }
 
 let null_module = {
@@ -1004,7 +1029,7 @@ let rec s_type ctx t =
 		s_type_path e.e_path ^ s_type_params ctx tl
 	| TInst (c,tl) ->
 		(match c.cl_kind with
-		| KExpr e -> Ast.s_expr e
+		| KExpr e -> Ast.Printer.s_expr e
 		| _ -> s_type_path c.cl_path ^ s_type_params ctx tl)
 	| TType (t,tl) ->
 		s_type_path t.t_path ^ s_type_params ctx tl
@@ -1195,7 +1220,7 @@ let rec s_expr s_type e =
 	| TCast (e,t) ->
 		sprintf "Cast %s%s" (match t with None -> "" | Some t -> s_type_path (t_path t) ^ ": ") (loop e)
 	| TMeta ((n,el,_),e) ->
-		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")") (loop e)
+		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.Printer.s_expr el)) ^ ")") (loop e)
 	| TIdent s ->
 		"Ident " ^ s
 	) in
@@ -1266,7 +1291,7 @@ let rec s_expr_pretty print_var_ids tabs top_level s_type e =
 	| TCast (e,Some mt) ->
 		sprintf "cast (%s,%s)" (loop e) (s_type_path (t_path mt))
 	| TMeta ((n,el,_),e) ->
-		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")") (loop e)
+		sprintf "@%s%s %s" (Meta.to_string n) (match el with [] -> "" | _ -> "(" ^ (String.concat ", " (List.map Ast.Printer.s_expr el)) ^ ")") (loop e)
 	| TIdent s ->
 		s
 
@@ -1352,7 +1377,7 @@ let rec s_expr_ast print_var_ids tabs s_type e =
 		let s = Meta.to_string m in
 		let s = match el with
 			| [] -> s
-			| _ -> sprintf "%s(%s)" s (String.concat ", " (List.map Ast.s_expr el))
+			| _ -> sprintf "%s(%s)" s (String.concat ", " (List.map Ast.Printer.s_expr el))
 		in
 		tag "Meta" [s; loop e1]
 	| TIdent s ->
@@ -1411,7 +1436,7 @@ module Printer = struct
 	let s_doc = s_opt (fun s -> s)
 
 	let s_metadata_entry (s,el,_) =
-		Printf.sprintf "@%s%s" (Meta.to_string s) (match el with [] -> "" | el -> "(" ^ (String.concat ", " (List.map Ast.s_expr el)) ^ ")")
+		Printf.sprintf "@%s%s" (Meta.to_string s) (match el with [] -> "" | el -> "(" ^ (String.concat ", " (List.map Ast.Printer.s_expr el)) ^ ")")
 
 	let s_metadata metadata =
 		s_list " " s_metadata_entry metadata
@@ -1432,8 +1457,6 @@ module Printer = struct
 			"cf_name",cf.cf_name;
 			"cf_doc",s_doc cf.cf_doc;
 			"cf_type",s_type_kind (follow cf.cf_type);
-			"cf_public",string_of_bool cf.cf_public;
-			"cf_final",string_of_bool cf.cf_final;
 			"cf_pos",s_pos cf.cf_pos;
 			"cf_name_pos",s_pos cf.cf_name_pos;
 			"cf_meta",s_metadata cf.cf_meta;
@@ -1830,6 +1853,12 @@ let rec type_eq param a b =
 		(match !t with
 		| None -> if param = EqCoreType || not (link t b a) then error [cannot_unify a b]
 		| Some t -> type_eq param a t)
+	| TAbstract ({a_path=[],"Null"},[t1]),TAbstract ({a_path=[],"Null"},[t2]) ->
+		type_eq param t1 t2
+	| TAbstract ({a_path=[],"Null"},[t]),_ when param <> EqDoNotFollowNull ->
+		type_eq param t b
+	| _,TAbstract ({a_path=[],"Null"},[t]) when param <> EqDoNotFollowNull ->
+		type_eq param a t
 	| TType (t1,tl1), TType (t2,tl2) when (t1 == t2 || (param = EqCoreType && t1.t_path = t2.t_path)) && List.length tl1 = List.length tl2 ->
 		type_eq_params param a b tl1 tl2
 	| TType (t,tl) , _ when can_follow a ->
@@ -1861,12 +1890,6 @@ let rec type_eq param a b =
 		)
 	| TDynamic a , TDynamic b ->
 		type_eq param a b
-	| TAbstract ({a_path=[],"Null"},[t1]),TAbstract ({a_path=[],"Null"},[t2]) ->
-		type_eq param t1 t2
-	| TAbstract ({a_path=[],"Null"},[t]),_ when param <> EqDoNotFollowNull ->
-		type_eq param t b
-	| _,TAbstract ({a_path=[],"Null"},[t]) when param <> EqDoNotFollowNull ->
-		type_eq param a t
 	| TAbstract (a1,tl1) , TAbstract (a2,tl2) ->
 		if a1 != a2 && not (param = EqCoreType && a1.a_path = a2.a_path) then error [cannot_unify a b];
 		type_eq_params param a b tl1 tl2
@@ -1884,7 +1907,7 @@ let rec type_eq param a b =
 					if f1.cf_kind <> f2.cf_kind && (param = EqStrict || param = EqCoreType || not (unify_kind f1.cf_kind f2.cf_kind)) then error [invalid_kind n f1.cf_kind f2.cf_kind];
 					let a = f1.cf_type and b = f2.cf_type in
 					(try type_eq param a b with Unify_error l -> error (invalid_field n :: l));
-					if f1.cf_public != f2.cf_public then error [invalid_visibility n];
+					if (has_class_field_flag f1 CfPublic) != (has_class_field_flag f2 CfPublic) then error [invalid_visibility n];
 				with
 					Not_found ->
 						if is_closed a2 then error [has_no_field b n];
@@ -2057,7 +2080,7 @@ let rec unify a b =
 				let _, ft, f1 = (try raw_class_field make_type c tl n with Not_found -> error [has_no_field a n]) in
 				let ft = apply_params c.cl_params tl ft in
 				if not (unify_kind f1.cf_kind f2.cf_kind) then error [invalid_kind n f1.cf_kind f2.cf_kind];
-				if f2.cf_public && not f1.cf_public then error [invalid_visibility n];
+				if (has_class_field_flag f2 CfPublic) && not (has_class_field_flag f1 CfPublic) then error [invalid_visibility n];
 
 				(match f2.cf_kind with
 				| Var { v_read = AccNo } | Var { v_read = AccNever } ->
@@ -2109,7 +2132,7 @@ let rec unify a b =
 				end;
 				(match f1.cf_kind with
 				| Method MethInline ->
-					if (c.cl_extern || f1.cf_extern) && not (Meta.has Meta.Runtime f1.cf_meta) then error [Has_no_runtime_field (a,n)];
+					if (c.cl_extern || has_class_field_flag f1 CfExtern) && not (Meta.has Meta.Runtime f1.cf_meta) then error [Has_no_runtime_field (a,n)];
 				| _ -> ());
 			) an.a_fields;
 			(match !(an.a_status) with
@@ -2142,7 +2165,7 @@ let rec unify a b =
 					if not (List.exists (fun t -> match follow t with TAbstract({a_path = ["haxe"],"Constructible"},[t2]) -> type_iseq t1 t2 | _ -> false) tl) then error [cannot_unify a b]
 				| _ ->
 					let _,t,cf = class_field c tl "new" in
-					if not cf.cf_public then error [invalid_visibility "new"];
+					if not (has_class_field_flag cf CfPublic) then error [invalid_visibility "new"];
 					begin try unify t t1
 					with Unify_error l -> error (cannot_unify a b :: l) end
 			end
@@ -2225,7 +2248,7 @@ and unify_anons a b a1 a2 =
 				| Opened, Var { v_read = AccNormal; v_write = AccNo }, Var { v_read = AccNormal; v_write = AccNormal } ->
 					f1.cf_kind <- f2.cf_kind;
 				| _ -> error [invalid_kind n f1.cf_kind f2.cf_kind]);
-			if f2.cf_public && not f1.cf_public then error [invalid_visibility n];
+			if (has_class_field_flag f2 CfPublic) && not (has_class_field_flag f1 CfPublic) then error [invalid_visibility n];
 			try
 				unify_with_access f1 (field_type f1) f2;
 				(match !(a1.a_status) with
@@ -2374,7 +2397,7 @@ and unify_with_access f1 t1 f2 =
 	| Var { v_read = AccNo } | Var { v_read = AccNever } -> unify f2.cf_type t1
 	(* read only *)
 	| Method MethNormal | Method MethInline | Var { v_write = AccNo } | Var { v_write = AccNever } ->
-		if f1.cf_final <> f2.cf_final then raise (Unify_error [FinalInvariance]);
+		if (has_class_field_flag f1 CfFinal) <> (has_class_field_flag f2 CfFinal) then raise (Unify_error [FinalInvariance]);
 		unify t1 f2.cf_type
 	(* read/write *)
 	| _ -> with_variance (type_eq EqBothDynamic) t1 f2.cf_type
@@ -2804,6 +2827,27 @@ module ExtType = struct
 		| TAbstract({a_path=[],"Void"},_) -> true
 		| _ -> false
 
+	let is_int t = match t with
+		| TAbstract({a_path=[],"Int"},_) -> true
+		| _ -> false
+
+	let is_float t = match t with
+		| TAbstract({a_path=[],"Float"},_) -> true
+		| _ -> false
+
+	let is_numeric t = match t with
+		| TAbstract({a_path=[],"Float"},_) -> true
+		| TAbstract({a_path=[],"Int"},_) -> true
+		| _ -> true
+
+	let is_string t = match t with
+		| TInst({cl_path=[],"String"},_) -> true
+		| _ -> false
+
+	let is_bool t = match t with
+		| TAbstract({a_path=[],"Bool"},_) -> true
+		| _ -> false
+
 	type semantics =
 		| VariableSemantics
 		| ReferenceSemantics
@@ -2952,9 +2996,12 @@ module TClass = struct
 				end else acc
 			in
 			let acc = if self_too || c != c0 then List.fold_left maybe_add acc c.cl_ordered_fields else acc in
-			match c.cl_super with
-			| Some(c,tl) -> loop acc c (List.map apply tl)
-			| None -> acc
+			if c.cl_interface then
+				List.fold_left (fun acc (i,tl) -> loop acc i (List.map apply tl)) acc c.cl_implements
+			else
+				match c.cl_super with
+				| Some(c,tl) -> loop acc c (List.map apply tl)
+				| None -> acc
 		in
 		loop PMap.empty c0 tl
 
@@ -2963,6 +3010,20 @@ module TClass = struct
 
 	let get_all_fields c tl =
 		get_member_fields' true c tl
+
+	let get_overridden_fields c cf =
+		let rec loop acc c = match c.cl_super with
+			| None ->
+				acc
+			| Some(c,_) ->
+				begin try
+					let cf' = PMap.find cf.cf_name c.cl_fields in
+					loop (cf' :: acc) c
+				with Not_found ->
+					loop acc c
+				end
+		in
+		loop [] c
 end
 
 let s_class_path c =

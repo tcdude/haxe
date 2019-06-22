@@ -26,38 +26,47 @@ open ClassFieldOrigin
 open DisplayTypes
 open DisplayEmitter
 open Genjson
+open Globals
+
+let exclude : string list ref = ref []
 
 let explore_class_paths com timer class_paths recusive f_pack f_module =
 	let rec loop dir pack =
-		try
-			let entries = Sys.readdir dir in
-			Array.iter (fun file ->
-				match file with
-					| "." | ".." ->
-						()
-					| _ when Sys.is_directory (dir ^ file) && file.[0] >= 'a' && file.[0] <= 'z' ->
-						begin try
-							begin match PMap.find file com.package_rules with
-								| Forbidden | Remap _ -> ()
-								| _ -> raise Not_found
+		let dot_path = (String.concat "." (List.rev pack)) in
+		begin
+			if (List.mem dot_path !exclude) then
+				()
+			else try
+				let entries = Sys.readdir dir in
+				Array.iter (fun file ->
+					match file with
+						| "." | ".." ->
+							()
+						| _ when Sys.is_directory (dir ^ file) && file.[0] >= 'a' && file.[0] <= 'z' ->
+							begin try
+								begin match PMap.find file com.package_rules with
+									| Forbidden | Remap _ -> ()
+									| _ -> raise Not_found
+								end
+							with Not_found ->
+								f_pack (List.rev pack,file);
+								if recusive then loop (dir ^ file ^ "/") (file :: pack)
 							end
-						with Not_found ->
-							f_pack (List.rev pack,file);
-							if recusive then loop (dir ^ file ^ "/") (file :: pack)
-						end
-					| _ ->
-						let l = String.length file in
-						if l > 3 && String.sub file (l - 3) 3 = ".hx" then begin
-							try
-								let name = String.sub file 0 (l - 3) in
-								let path = (List.rev pack,name) in
-								f_module path;
-							with _ ->
-								()
-						end
-			) entries;
-		with Sys_error _ ->
-			()
+						| _ ->
+							let l = String.length file in
+							if l > 3 && String.sub file (l - 3) 3 = ".hx" then begin
+								try
+									let name = String.sub file 0 (l - 3) in
+									let path = (List.rev pack,name) in
+									let dot_path = if dot_path = "" then name else dot_path ^ "." ^ name in
+									if (List.mem dot_path !exclude) then () else f_module path;
+								with _ ->
+									()
+							end
+				) entries;
+			with Sys_error _ ->
+				()
+		end
 	in
 	let t = Timer.timer (timer @ ["class path exploration"]) in
 	List.iter (fun dir -> loop dir []) class_paths;
@@ -66,7 +75,7 @@ let explore_class_paths com timer class_paths recusive f_pack f_module =
 let read_class_paths com timer =
 	let sign = Define.get_signature com.defines in
 	explore_class_paths com timer (List.filter ((<>) "") com.class_path) true (fun _ -> ()) (fun path ->
-		let file,_,pack,_ = TypeloadParse.parse_module' com path Globals.null_pos in
+		let file,_,pack,_ = Display.parse_module' com path Globals.null_pos in
 		match CompilationServer.get() with
 		| Some cs when pack <> fst path ->
 			let file = Path.unique_full_path file in
@@ -147,7 +156,7 @@ let collect ctx tk with_type =
 			let mname = snd (t_infos mt).mt_module.m_path in
 			let path = if snd path = mname then path else (fst path @ [mname],snd path) in
 			if not (path_exists cctx path) then begin
-				merge_core_doc ctx mt;
+				Display.merge_core_doc ctx mt;
 				let is = get_import_status cctx true path in
 				if not (Meta.has Meta.NoCompletion (t_infos mt).mt_meta) then begin
 					add (make_ci_type (CompletionModuleType.of_module_type mt) is None) (Some (snd path));
@@ -313,8 +322,8 @@ let collect ctx tk with_type =
 
 		(* keywords *)
 		let kwds = [
-			Function; Var; If; Else; While; Do; For; Break; Return; Continue; Switch;
-			Try; New; Throw; Untyped; Cast;
+			Function; Var; Final; If; Else; While; Do; For; Break; Return; Continue; Switch;
+			Try; New; Throw; Untyped; Cast; Inline;
 		] in
 		List.iter (fun kwd -> add(make_ci_keyword kwd) (Some (s_keyword kwd))) kwds;
 
@@ -343,7 +352,7 @@ let collect ctx tk with_type =
 		let class_paths = List.filter (fun s -> s <> "") class_paths in
 		explore_class_paths ctx.com ["display";"toplevel"] class_paths true add_package (fun path ->
 			if not (path_exists cctx path) then begin
-				let _,decls = TypeloadParse.parse_module ctx path Globals.null_pos in
+				let _,decls = Display.parse_module ctx path Globals.null_pos in
 				process_decls (fst path) (snd path) decls
 			end
 		)
@@ -362,12 +371,17 @@ let collect ctx tk with_type =
 		let files = List.sort (fun (_,i1) (_,i2) -> -compare i1 i2) files in
 		List.iter (fun ((file,cfile),_) ->
 			let module_name = CompilationServer.get_module_name_of_cfile file cfile in
-			begin match List.rev cfile.c_package with
-				| [] -> ()
-				| s :: sl -> add_package (List.rev sl,s)
-			end;
-			Hashtbl.replace ctx.com.module_to_file (cfile.c_package,module_name) file;
-			process_decls cfile.c_package module_name cfile.c_decls
+			let dot_path = s_type_path (cfile.c_package,module_name) in
+			if (List.exists (fun e -> ExtString.String.starts_with dot_path (e ^ ".")) !exclude) then
+				()
+			else begin
+				begin match List.rev cfile.c_package with
+					| [] -> ()
+					| s :: sl -> add_package (List.rev sl,s)
+				end;
+				Hashtbl.replace ctx.com.module_to_file (cfile.c_package,module_name) file;
+				process_decls cfile.c_package module_name cfile.c_decls
+			end
 		) files
 	end;
 

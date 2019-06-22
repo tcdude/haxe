@@ -5,6 +5,9 @@ import runci.System.*;
 import runci.Config.*;
 
 class Php {
+	static var miscPhpDir(get,never):String;
+	static inline function get_miscPhpDir() return miscDir + 'php/';
+
 	static public function getPhpDependencies() {
 		var phpCmd = commandResult("php", ["-v"]);
 		var phpVerReg = ~/PHP ([0-9]+\.[0-9]+)/i;
@@ -30,12 +33,44 @@ class Php {
 
 	static public function run(args:Array<String>) {
 		getPhpDependencies();
-		runCommand("haxe", ["compile-php.hxml"].concat(args));
-		runCommand("php", ["bin/php/index.php"]);
 
-		changeDirectory(sysDir);
-		haxelibInstall("utest");
-		runCommand("haxe", ["compile-php.hxml"]);
-		runCommand("php", ["bin/php/Main/index.php"]);
+		var binDir = "bin/php";
+
+		var prefixes = [[]];
+		if(isCi()) {
+			prefixes.push(['-D', 'php-prefix=haxe']);
+			prefixes.push(['-D', 'php-prefix=my.pack']);
+		}
+
+		for(prefix in prefixes) {
+			changeDirectory(unitDir);
+			if(isCi()) {
+				deleteDirectoryRecursively(binDir);
+			}
+
+			runCommand("haxe", ["compile-php.hxml"].concat(prefix).concat(args));
+			runThroughPhpVersions(runCommand.bind("php", [binDir + "/index.php"]));
+
+			changeDirectory(sysDir);
+			if(isCi()) {
+				deleteDirectoryRecursively(binDir);
+			}
+			runCommand("haxe", ["compile-php.hxml"].concat(prefix));
+			runThroughPhpVersions(runCommand.bind("php", ["bin/php/Main/index.php"]));
+
+			changeDirectory(miscPhpDir);
+			runThroughPhpVersions(runCommand.bind("haxe", ["run.hxml"]));
+		}
+	}
+
+	static function runThroughPhpVersions(fn:()->Void) {
+	if(isCi() && systemName == "Linux") {
+			for(version in ['7.0', '7.1'/*, '7.2', '7.3'*/]) { //7.2 and 7.3 are not available on travis Ubuntu trusty
+				runCommand("phpenv", ["global", version]);
+				fn();
+			}
+		} else {
+			fn();
+		}
 	}
 }

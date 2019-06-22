@@ -43,7 +43,7 @@ class RunCi {
 			var success = true;
 			try {
 				changeDirectory(unitDir);
-
+				haxelibInstallGit("haxe-utest", "utest", "master");
 
 				var args = switch (ci) {
 					case TravisCI:
@@ -72,6 +72,8 @@ class RunCi {
 						runci.targets.Js.run(args);
 					case Java:
 						runci.targets.Java.run(args);
+					case Jvm:
+						runci.targets.Jvm.run(args);
 					case Cs:
 						runci.targets.Cs.run(args);
 					case Flash9:

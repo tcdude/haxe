@@ -32,6 +32,7 @@ open Type
 open Typecore
 open Error
 open Globals
+open Filename
 
 let build_count = ref 0
 
@@ -42,7 +43,7 @@ let check_field_access ctx cff =
 	let rec loop p0 acc l =
 		let check_display p1 =
 			let pmid = {p0 with pmin = p0.pmax; pmax = p1.pmin} in
-			if DisplayPosition.encloses_display_position pmid then match acc with
+			if DisplayPosition.display_position#enclosed_in pmid then match acc with
 			| access :: _ -> display_access := Some access;
 			| [] -> ()
 		in
@@ -247,15 +248,16 @@ let rec load_instance' ctx (t,p) allow_no_params =
 			| TClassDecl {cl_kind = KGeneric} -> true,false
 			| TClassDecl {cl_kind = KGenericBuild _} -> false,true
 			| TTypeDecl td ->
-				begin try
-					let msg = match Meta.get Meta.Deprecated td.t_meta with
-						| _,[EConst(String s),_],_ -> s
-						| _ -> "This typedef is deprecated in favor of " ^ (s_type (print_context()) td.t_type)
-					in
-					ctx.com.warning msg p
-				with Not_found ->
-					()
-				end;
+				if not (Common.defined ctx.com Define.NoDeprecationWarnings) then
+					begin try
+						let msg = match Meta.get Meta.Deprecated td.t_meta with
+							| _,[EConst(String s),_],_ -> s
+							| _ -> "This typedef is deprecated in favor of " ^ (s_type (print_context()) td.t_type)
+						in
+						ctx.com.warning msg p
+					with Not_found ->
+						()
+					end;
 				false,false
 			| _ -> false,false
 		in
@@ -351,7 +353,7 @@ and load_instance ctx ?(allow_display=false) (t,pn) allow_no_params =
 		let t = load_instance' ctx (t,pn) allow_no_params in
 		if allow_display then DisplayEmitter.check_display_type ctx t pn;
 		t
-	with Error (Module_not_found path,_) when (ctx.com.display.dms_kind = DMDefault) && DisplayPosition.encloses_display_position pn ->
+	with Error (Module_not_found path,_) when (ctx.com.display.dms_kind = DMDefault) && DisplayPosition.display_position#enclosed_in pn ->
 		let s = s_type_path path in
 		raise_fields (DisplayToplevel.collect ctx TKType NoValue) CRTypeHint (Some {pn with pmin = pn.pmax - String.length s;});
 
@@ -457,7 +459,9 @@ and load_complex_type' ctx allow_display (t,p) =
 				match fst a with
 				| APublic -> ()
 				| APrivate ->
-					ctx.com.warning "private structure fields are deprecated" (pos a);
+					let p = pos a in
+					if Filename.basename p.pfile <> "NativeIterable.hx" then (* Terrible workaround for #7436 *)
+						ctx.com.warning "private structure fields are deprecated" p;
 					pub := false;
 				| ADynamic when (match f.cff_kind with FFun _ -> true | _ -> false) -> dyn := true
 				| AFinal -> final := true
@@ -502,18 +506,17 @@ and load_complex_type' ctx allow_display (t,p) =
 			) in
 			let t = if Meta.has Meta.Optional f.cff_meta then ctx.t.tnull t else t in
 			let cf = {
-				(mk_field n t p (pos f.cff_name)) with
-				cf_public = !pub;
+				(mk_field n ~public:!pub t p (pos f.cff_name)) with
 				cf_kind = access;
 				cf_params = !params;
 				cf_doc = f.cff_doc;
 				cf_meta = f.cff_meta;
-				cf_final = !final;
 			} in
+			if !final then add_class_field_flag cf CfFinal;
 			init_meta_overloads ctx None cf;
 			if ctx.is_display_file then begin
 				DisplayEmitter.check_display_metadata ctx cf.cf_meta;
-				if DisplayPosition.encloses_display_position cf.cf_name_pos then displayed_field := Some cf;
+				if DisplayPosition.display_position#enclosed_in cf.cf_name_pos then displayed_field := Some cf;
 			end;
 			PMap.add n cf acc
 		in
@@ -522,7 +525,7 @@ and load_complex_type' ctx allow_display (t,p) =
 		| None ->
 			()
 		| Some cf ->
-			DisplayEmitter.display_field ctx (AnonymousStructure a) CFSMember cf cf.cf_name_pos;
+			delay ctx PBuildClass (fun () -> DisplayEmitter.display_field ctx (AnonymousStructure a) CFSMember cf cf.cf_name_pos);
 		end;
 		TAnon a
 	| CTFunction (args,r) ->
@@ -543,7 +546,7 @@ and load_complex_type ctx allow_display (t,pn) =
 		if Diagnostics.is_diagnostics_run p then begin
 			delay ctx PForce (fun () -> DisplayToplevel.handle_unresolved_identifier ctx name p true);
 			t_dynamic
-		end else if ctx.com.display.dms_display then
+		end else if ctx.com.display.dms_display && not (DisplayPosition.display_position#enclosed_in pn) then
 			t_dynamic
 		else
 			raise exc
@@ -567,7 +570,7 @@ and init_meta_overloads ctx co cf =
 			let params = (!type_function_params_rec) ctx f cf.cf_name p in
 			ctx.type_params <- params @ ctx.type_params;
 			let topt = function None -> error "Explicit type required" p | Some t -> load_complex_type ctx true t in
-			let args = List.map (fun ((a,_),opt,_,t,_) -> a,opt,topt t) f.f_args in
+			let args = List.map (fun ((a,_),opt,_,t,cto) -> a,opt || cto <> None,topt t) f.f_args in
 			let cf = { cf with cf_type = TFun (args,topt f.f_type); cf_params = params; cf_meta = cf_meta} in
 			generate_value_meta ctx.com co (fun meta -> cf.cf_meta <- meta :: cf.cf_meta) f.f_args;
 			overloads := cf :: !overloads;
@@ -690,7 +693,7 @@ let rec type_type_param ?(enum_constructor=false) ctx path get_params p tp =
 	c.cl_meta <- tp.Ast.tp_meta;
 	if enum_constructor then c.cl_meta <- (Meta.EnumConstructorParam,[],null_pos) :: c.cl_meta;
 	let t = TInst (c,List.map snd c.cl_params) in
-	if ctx.is_display_file && DisplayPosition.encloses_display_position (pos tp.tp_name) then
+	if ctx.is_display_file && DisplayPosition.display_position#enclosed_in (pos tp.tp_name) then
 		DisplayEmitter.display_type ctx t (pos tp.tp_name);
 	match tp.tp_constraints with
 	| None ->
@@ -733,9 +736,11 @@ let load_core_class ctx c =
 			com2.defines.Define.values <- PMap.empty;
 			Common.define com2 Define.CoreApi;
 			Common.define com2 Define.Sys;
+			Define.raw_define_value com2.defines "target.threaded" "true"; (* hack because we check this in sys.thread classes *)
 			if ctx.in_macro then Common.define com2 Define.Macro;
 			com2.class_path <- ctx.com.std_path;
 			if com2.display.dms_check_core_api then com2.display <- {com2.display with dms_check_core_api = false};
+			Option.may (fun cs -> CompilationServer.maybe_add_context_sign cs com2 "load_core_class") (CompilationServer.get ());
 			let ctx2 = ctx.g.do_create com2 in
 			ctx.g.core_api <- Some ctx2;
 			ctx2
@@ -785,7 +790,7 @@ let init_core_api ctx c =
 		with Unify_error l ->
 			display_error ctx ("Field " ^ f.cf_name ^ " has different type than in core type") p;
 			display_error ctx (error_msg (Unify l)) p);
-		if f2.cf_public <> f.cf_public then error ("Field " ^ f.cf_name ^ " has different visibility than core type") p;
+		if (has_class_field_flag f2 CfPublic) <> (has_class_field_flag f CfPublic) then error ("Field " ^ f.cf_name ^ " has different visibility than core type") p;
 		(match f2.cf_doc with
 		| None -> f2.cf_doc <- f.cf_doc
 		| Some _ -> ());
@@ -806,22 +811,22 @@ let init_core_api ctx c =
 	in
 	let check_fields fcore fl =
 		PMap.iter (fun i f ->
-			if not f.cf_public then () else
+			if not (has_class_field_flag f CfPublic) then () else
 			let f2 = try PMap.find f.cf_name fl with Not_found -> error ("Missing field " ^ i ^ " required by core type") c.cl_pos in
 			compare_fields f f2;
 		) fcore;
 		PMap.iter (fun i f ->
 			let p = (match f.cf_expr with None -> c.cl_pos | Some e -> e.epos) in
-			if f.cf_public && not (Meta.has Meta.Hack f.cf_meta) && not (PMap.mem f.cf_name fcore) && not (List.memq f c.cl_overrides) then error ("Public field " ^ i ^ " is not part of core type") p;
+			if (has_class_field_flag f CfPublic) && not (Meta.has Meta.Hack f.cf_meta) && not (PMap.mem f.cf_name fcore) && not (List.memq f c.cl_overrides) then error ("Public field " ^ i ^ " is not part of core type") p;
 		) fl;
 	in
 	check_fields ccore.cl_fields c.cl_fields;
 	check_fields ccore.cl_statics c.cl_statics;
 	(match ccore.cl_constructor, c.cl_constructor with
 	| None, None -> ()
-	| Some { cf_public = false }, _ -> ()
+	| Some cf, _ when not (has_class_field_flag cf CfPublic) -> ()
 	| Some f, Some f2 -> compare_fields f f2
-	| None, Some { cf_public = false } -> ()
+	| None, Some cf when not (has_class_field_flag cf CfPublic) -> ()
 	| _ -> error "Constructor differs from core type" c.cl_pos)
 
 let string_list_of_expr_path (e,p) =
@@ -839,7 +844,7 @@ let handle_path_display ctx path p =
 		in
 		DisplayEmitter.display_field ctx origin CFSStatic cf p
 	in
-	match ImportHandling.convert_import_to_something_usable !DisplayPosition.display_position path,ctx.com.display.dms_kind with
+	match ImportHandling.convert_import_to_something_usable DisplayPosition.display_position#get path,ctx.com.display.dms_kind with
 		| (IDKPackage [_],p),DMDefault ->
 			let fields = DisplayToplevel.collect ctx TKType WithType.no_value in
 			raise_fields fields CRImport (Some p)

@@ -3,7 +3,9 @@ package runci.targets;
 import sys.io.File;
 import sys.FileSystem;
 import haxe.io.Path;
+import haxe.Json;
 import sys.io.Process;
+import haxe.Http;
 
 import runci.System.*;
 import runci.Config.*;
@@ -13,6 +15,25 @@ class Flash {
 		var appcast = Xml.parse(haxe.Http.requestUrl("http://fpdownload2.macromedia.com/get/flashplayer/update/current/xml/version_en_mac_pep.xml"));
 		var versionStr = new haxe.xml.Access(appcast).node.XML.node.update.att.version;
 		return versionStr.split(",").map(Std.parseInt);
+	}
+
+	static public function setupFlexSdk():Void {
+		if (commandSucceed("mxmlc", ["--version"])) {
+			infoMsg('mxmlc has already been installed.');
+		} else {
+			var apacheMirror = Json.parse(Http.requestUrl("http://www.apache.org/dyn/closer.lua?as_json=1")).preferred;
+			var flexVersion = "4.16.0";
+			runCommand("wget", ["-nv", '${apacheMirror}/flex/${flexVersion}/binaries/apache-flex-sdk-${flexVersion}-bin.tar.gz'], true);
+			runCommand("tar", ["-xf", 'apache-flex-sdk-${flexVersion}-bin.tar.gz', "-C", Sys.getEnv("HOME")]);
+			var flexsdkPath = Sys.getEnv("HOME") + '/apache-flex-sdk-${flexVersion}-bin';
+			addToPATH(flexsdkPath + "/bin");
+			var playerglobalswcFolder = flexsdkPath + "/player";
+			FileSystem.createDirectory(playerglobalswcFolder + "/11.1");
+			var flashVersion = runci.targets.Flash.getLatestFPVersion();
+			runCommand("wget", ["-nv", 'http://download.macromedia.com/get/flashplayer/updaters/${flashVersion[0]}/playerglobal${flashVersion[0]}_${flashVersion[1]}.swc', "-O", playerglobalswcFolder + "/11.1/playerglobal.swc"], true);
+			File.saveContent(flexsdkPath + "/env.properties", 'env.PLAYERGLOBAL_HOME=$playerglobalswcFolder');
+			runCommand("mxmlc", ["--version"]);
+		}
 	}
 
 	static public function setupFlashPlayerDebugger():Void {
@@ -27,16 +48,20 @@ class Flash {
 
 		switch (systemName) {
 			case "Linux":
-				Linux.requireAptPackages([
-					"libglib2.0", "libfreetype6"
-				]);
-				var majorVersion = getLatestFPVersion()[0];
-				runCommand("wget", ["-nv", 'http://fpdownload.macromedia.com/pub/flashplayer/updaters/${majorVersion}/flash_player_sa_linux_debug.x86_64.tar.gz'], true);
-				runCommand("tar", ["-xf", "flash_player_sa_linux_debug.x86_64.tar.gz", "-C", Sys.getEnv("HOME")]);
+				var playerCmd = "flashplayerdebugger";
+				if(Sys.command("type", [playerCmd]) != 0) {
+					Linux.requireAptPackages([
+						"libglib2.0", "libfreetype6"
+					]);
+					var majorVersion = getLatestFPVersion()[0];
+					runCommand("wget", ["-nv", 'http://fpdownload.macromedia.com/pub/flashplayer/updaters/${majorVersion}/flash_player_sa_linux_debug.x86_64.tar.gz'], true);
+					runCommand("tar", ["-xf", "flash_player_sa_linux_debug.x86_64.tar.gz", "-C", Sys.getEnv("HOME")]);
+					playerCmd = Sys.getEnv("HOME") + "/flashplayerdebugger";
+				}
 				if (!FileSystem.exists(mmcfgPath)) {
 					File.saveContent(mmcfgPath, "ErrorReportingEnable=1\nTraceOutputFileEnable=1");
 				}
-				runCommand(Sys.getEnv("HOME") + "/flashplayerdebugger", ["-v"]);
+				runCommand(playerCmd, ["-v"]);
 			case "Mac":
 				if (commandResult("brew", ["cask", "list", "flash-player-debugger"]).exitCode == 0) {
 					return;
@@ -67,7 +92,11 @@ class Flash {
 		Sys.println('going to run $swf');
 		switch (systemName) {
 			case "Linux":
-				new Process(Sys.getEnv("HOME") + "/flashplayerdebugger", [swf]);
+				var playerCmd = "flashplayerdebugger";
+				if(Sys.command("type", [playerCmd]) != 0) {
+					playerCmd = Sys.getEnv("HOME") + "/flashplayerdebugger";
+				}
+				new Process(playerCmd, [swf]);
 			case "Mac":
 				Sys.command("open", ["-a", "/Applications/Flash Player Debugger.app", swf]);
 		}
@@ -94,26 +123,30 @@ class Flash {
 
 		//read flashlog.txt continously
 		var traceProcess = new Process("tail", ["-f", flashlogPath]);
-		var line = "";
+		var success = false;
 		while (true) {
 			try {
-				line = traceProcess.stdout.readLine();
-				Sys.println(line);
-				if (line.indexOf("SUCCESS: ") >= 0) {
-					return line.indexOf("SUCCESS: true") >= 0;
+				var line = traceProcess.stdout.readLine();
+				if (line.indexOf("success: ") >= 0) {
+					success = line.indexOf("success: true") >= 0;
+					break;
 				}
 			} catch (e:haxe.io.Eof) {
 				break;
 			}
 		}
-		return false;
+		Sys.command("cat", [flashlogPath]);
+		return success;
 	}
 
 	static public function run(args:Array<String>) {
 		setupFlashPlayerDebugger();
+		setupFlexSdk();
 		runCommand("haxe", ["compile-flash9.hxml", "-D", "fdb", "-D", "dump", "-D", "dump_ignore_var_ids"].concat(args));
 		var success = runFlash("bin/unit9.swf");
 		if (!success)
 			fail();
 	}
+
+
 }

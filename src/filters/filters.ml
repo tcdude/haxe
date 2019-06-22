@@ -554,9 +554,9 @@ let add_field_inits reserved ctx t =
 				match cf.cf_expr with
 				| None -> assert false
 				| Some e ->
-					let lhs = mk (TField(ethis,FInstance (c,List.map snd c.cl_params,cf))) cf.cf_type e.epos in
+					let lhs = mk (TField({ ethis with epos = cf.cf_pos },FInstance (c,List.map snd c.cl_params,cf))) cf.cf_type cf.cf_pos in
 					cf.cf_expr <- None;
-					let eassign = mk (TBinop(OpAssign,lhs,e)) e.etype e.epos in
+					let eassign = mk (TBinop(OpAssign,lhs,e)) cf.cf_type e.epos in
 					if is_as3 then begin
 						let echeck = mk (TBinop(OpEq,lhs,(mk (TConst TNull) lhs.etype e.epos))) ctx.com.basic.tbool e.epos in
 						mk (TIf(echeck,eassign,None)) eassign.etype e.epos
@@ -641,7 +641,7 @@ let check_cs_events com t = match t with
 		let check fields f =
 			match f.cf_kind with
 			| Var { v_read = AccNormal; v_write = AccNormal } when Meta.has Meta.Event f.cf_meta ->
-				if f.cf_public then error "@:event fields must be private" f.cf_pos;
+				if (has_class_field_flag f CfPublic) then error "@:event fields must be private" f.cf_pos;
 
 				(* prevent generating reflect helpers for the event in gencommon *)
 				f.cf_meta <- (Meta.SkipReflection, [], f.cf_pos) :: f.cf_meta;
@@ -807,7 +807,7 @@ let run com tctx main =
 			filters @ [
 				TryCatchWrapper.configure_cs com
 			]
-		| Java ->
+		| Java when not (Common.defined com Jvm)->
 			SetHXGen.run_filter com new_types;
 			filters @ [
 				TryCatchWrapper.configure_java com
@@ -842,7 +842,9 @@ let run com tctx main =
 	let filters = [
 		Optimizer.sanitize com;
 		if com.config.pf_add_final_return then add_final_return else (fun e -> e);
-		rename_local_vars tctx reserved;
+		(match com.platform with
+		| Eval -> (fun e -> e)
+		| _ -> rename_local_vars tctx reserved);
 		mark_switch_break_loops;
 	] in
 	let t = filter_timer detail_times ["expr 2"] in
@@ -902,4 +904,5 @@ let run com tctx main =
 	in
 	let t = filter_timer detail_times ["type 3"] in
 	List.iter (fun t -> List.iter (fun f -> f tctx t) type_filters) com.types;
-	t()
+	t();
+	List.iter (fun f -> f()) (List.rev com.callbacks#get_after_filters)

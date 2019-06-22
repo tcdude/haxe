@@ -28,9 +28,9 @@ type error_msg =
 	| Unterminated_regexp
 	| Unclosed_comment
 	| Unclosed_code
-	| Invalid_escape of char
+	| Invalid_escape of char * (string option)
 	| Invalid_option
-	| Unterminated_xml
+	| Unterminated_markup
 
 exception Error of error_msg * pos
 
@@ -47,9 +47,10 @@ let error_msg = function
 	| Unterminated_regexp -> "Unterminated regular expression"
 	| Unclosed_comment -> "Unclosed comment"
 	| Unclosed_code -> "Unclosed code string"
-	| Invalid_escape c -> Printf.sprintf "Invalid escape sequence \\%s" (Char.escaped c)
+	| Invalid_escape (c,None) -> Printf.sprintf "Invalid escape sequence \\%s" (Char.escaped c)
+	| Invalid_escape (c,Some msg) -> Printf.sprintf "Invalid escape sequence \\%s. %s" (Char.escaped c) msg
 	| Invalid_option -> "Invalid regular expression option"
-	| Unterminated_xml -> "Unterminated XML literal"
+	| Unterminated_markup -> "Unterminated markup literal"
 
 type lexer_file = {
 	lfile : string;
@@ -276,11 +277,26 @@ let ident = [%sedlex.regexp?
 	)
 ]
 
+let sharp_ident = [%sedlex.regexp?
+	(
+		('a'..'z' | 'A'..'Z' | '_'),
+		Star ('a'..'z' | 'A'..'Z' | '0'..'9' | '_'),
+		Star (
+			'.',
+			('a'..'z' | 'A'..'Z' | '_'),
+			Star ('a'..'z' | 'A'..'Z' | '0'..'9' | '_')
+		)
+	)
+]
+
 let idtype = [%sedlex.regexp? Star '_', 'A'..'Z', Star ('_' | 'a'..'z' | 'A'..'Z' | '0'..'9')]
 
 let integer = [%sedlex.regexp? ('1'..'9', Star ('0'..'9')) | '0']
 
-let xml_ident = [%sedlex.regexp? Opt('$'), (ident | idtype)]
+(* https://www.w3.org/TR/xml/#sec-common-syn plus '$' for JSX *)
+let xml_name_start_char = [%sedlex.regexp? '$' | ':' | 'A'..'Z' | '_' | 'a'..'z' | 0xC0 .. 0xD6 | 0xD8 .. 0xF6 | 0xF8 .. 0x2FF | 0x370 .. 0x37D | 0x37F .. 0x1FFF | 0x200C .. 0x200D | 0x2070 .. 0x218F | 0x2C00 .. 0x2FEF | 0x3001 .. 0xD7FF | 0xF900 .. 0xFDCF | 0xFDF0 .. 0xFFFD | 0x10000 .. 0xEFFFF]
+let xml_name_char = [%sedlex.regexp? xml_name_start_char | '-' | '.' | '0'..'9' | 0xB7 | 0x0300 .. 0x036F | 0x203F .. 0x2040]
+let xml_name = [%sedlex.regexp? Opt(xml_name_start_char, Star xml_name_char)]
 
 let rec skip_header lexbuf =
 	match%sedlex lexbuf with
@@ -367,13 +383,13 @@ let rec token lexbuf =
 		reset();
 		let pmin = lexeme_start lexbuf in
 		let pmax = (try string lexbuf with Exit -> error Unterminated_string pmin) in
-		let str = (try unescape (contents()) with Invalid_escape_sequence(c,i) -> error (Invalid_escape c) (pmin + i)) in
+		let str = (try unescape (contents()) with Invalid_escape_sequence(c,i,msg) -> error (Invalid_escape (c,msg)) (pmin + i)) in
 		mk_tok (Const (String str)) pmin pmax;
 	| "'" ->
 		reset();
 		let pmin = lexeme_start lexbuf in
 		let pmax = (try string2 lexbuf with Exit -> error Unterminated_string pmin) in
-		let str = (try unescape (contents()) with Invalid_escape_sequence(c,i) -> error (Invalid_escape c) (pmin + i)) in
+		let str = (try unescape (contents()) with Invalid_escape_sequence(c,i,msg) -> error (Invalid_escape (c,msg)) (pmin + i)) in
 		let t = mk_tok (Const (String str)) pmin pmax in
 		fast_add_fmt_string (snd t);
 		t
@@ -551,7 +567,7 @@ and not_xml ctx depth in_open =
 		store lexbuf;
 		not_xml ctx depth in_open
 	(* closing tag *)
-	| '<','/',xml_ident,'>' ->
+	| '<','/',xml_name,'>' ->
 		let s = lexeme lexbuf in
 		Buffer.add_string buf s;
 		(* If it matches our document close tag, finish or decrease depth. *)
@@ -561,7 +577,7 @@ and not_xml ctx depth in_open =
 		end else
 			not_xml ctx depth false
 	(* opening tag *)
-	| '<',xml_ident ->
+	| '<',xml_name ->
 		let s = lexeme lexbuf in
 		Buffer.add_string buf s;
 		(* If it matches our document open tag, increase depth and set in_open to true. *)
@@ -585,13 +601,29 @@ and not_xml ctx depth in_open =
 	| _ ->
 		assert false
 
-let lex_xml p open_tag close_tag lexbuf =
+let rec sharp_token lexbuf =
+	match%sedlex lexbuf with
+	| sharp_ident -> mk_ident lexbuf
+	| Plus (Chars " \t") -> sharp_token lexbuf
+	| "\r\n" -> newline lexbuf; sharp_token lexbuf
+	| '\n' | '\r' -> newline lexbuf; sharp_token lexbuf
+	| _ -> token lexbuf
+
+let lex_xml p lexbuf =
+	let name,pmin = match%sedlex lexbuf with
+	| xml_name -> lexeme lexbuf,lexeme_start lexbuf
+	| _ -> invalid_char lexbuf
+	in
+	if p + 1 <> pmin then invalid_char lexbuf;
+	Buffer.add_string buf ("<" ^ name);
+	let open_tag = "<" ^ name in
+	let close_tag = "</" ^ name ^ ">" in
 	let ctx = {
 		open_tag = open_tag;
 		close_tag = close_tag;
 		lexbuf = lexbuf;
 	} in
 	try
-		not_xml ctx 0 true
+		not_xml ctx 0 (name <> "") (* don't allow self-closing fragments *)
 	with Exit ->
-		error Unterminated_xml p
+		error Unterminated_markup p

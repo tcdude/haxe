@@ -19,6 +19,7 @@
 open Globals
 open Ast
 open Parser
+open Semver
 open Grammar
 open DisplayPosition
 
@@ -28,6 +29,7 @@ type small_type =
 	| TBool of bool
 	| TFloat of float
 	| TString of string
+	| TVersion of (version * version * version) * (version list option)
 
 let is_true = function
 	| TBool false | TNull | TFloat 0. | TString "" -> false
@@ -41,6 +43,9 @@ let cmp v1 v2 =
 	| TBool a, TBool b -> compare a b
 	| TString a, TFloat b -> compare (float_of_string a) b
 	| TFloat a, TString b -> compare a (float_of_string b)
+	| TString a, TVersion (release,pre) -> compare_version (parse_version a) (release,pre)
+	| TVersion (release,pre), TString b -> compare_version (release,pre) (parse_version b)
+	| TVersion (release1,pre1), TVersion (release2,pre2) -> compare_version (release1,pre1) (release2,pre2)
 	| _ -> raise Exit (* always false *)
 
 let rec eval ctx (e,p) =
@@ -50,6 +55,9 @@ let rec eval ctx (e,p) =
 	| EConst (String s) -> TString s
 	| EConst (Int i) -> TFloat (float_of_string i)
 	| EConst (Float f) -> TFloat (float_of_string f)
+	| ECall ((EConst (Ident "version"),_),[(EConst (String s), p)]) ->
+		(try match parse_version s with release,pre -> TVersion (release,pre)
+		with Invalid_argument msg -> error (Custom msg) p)
 	| EBinop (OpBoolAnd, e1, e2) -> TBool (is_true (eval ctx e1) && is_true (eval ctx e2))
 	| EBinop (OpBoolOr, e1, e2) -> TBool (is_true (eval ctx e1) || is_true(eval ctx e2))
 	| EUnop (Not, _, e) -> TBool (not (is_true (eval ctx e)))
@@ -58,7 +66,8 @@ let rec eval ctx (e,p) =
 		let v1 = eval ctx e1 in
 		let v2 = eval ctx e2 in
 		let compare op =
-			TBool (try op (cmp v1 v2) 0 with _ -> false)
+			try TBool (try op (cmp v1 v2) 0 with _ -> false)
+			with Invalid_argument msg -> error (Custom msg) p
 		in
 		(match op with
 		| OpEq -> compare (=)
@@ -68,6 +77,14 @@ let rec eval ctx (e,p) =
 		| OpLt -> compare (<)
 		| OpLte -> compare (<=)
 		| _ -> error (Custom "Unsupported operation") p)
+	| EField _ ->
+		begin try
+			let sl = string_list_of_expr_path_raise (e,p) in
+			let i = String.concat "." (List.rev sl) in
+			(try TString (Define.raw_defined_value ctx i) with Not_found -> TNull)
+		with Exit ->
+			error (Custom "Invalid condition expression") p
+		end
 	| _ ->
 		error (Custom "Invalid condition expression") p
 
@@ -78,13 +95,16 @@ let parse ctx code file =
 	let was_display = !in_display in
 	let was_display_file = !in_display_file in
 	let old_code = !code_ref in
+	let old_macro = !in_macro in
 	code_ref := code;
-	in_display := !display_position <> null_pos;
-	in_display_file := !in_display && Path.unique_full_path file = !display_position.pfile;
+	in_display := display_position#get <> null_pos;
+	in_display_file := !in_display && Path.unique_full_path file = (display_position#get).pfile;
+	syntax_errors := [];
 	let restore =
 		(fun () ->
 			restore_cache ();
 			in_display := was_display;
+			in_macro := old_macro;
 			in_display_file := was_display_file;
 			code_ref := old_code;
 		)
@@ -94,7 +114,7 @@ let parse ctx code file =
 	in_macro := Define.defined ctx Define.Macro;
 	Lexer.skip_header code;
 
-	let sraw = Stream.from (fun _ -> Some (Lexer.token code)) in
+	let sraw = Stream.from (fun _ -> Some (Lexer.sharp_token code)) in
 	let rec next_token() = process_token (Lexer.token code)
 
 	and process_token tk =
@@ -106,7 +126,7 @@ let parse ctx code file =
 			if l > 0 && s.[0] = '*' then last_doc := Some (String.sub s 1 (l - (if l > 1 && s.[l-1] = '*' then 2 else 1)), (snd tk).pmin);
 			tk
 		| CommentLine s ->
-			if !in_display_file && encloses_display_position (pos tk) then syntax_completion SCComment (pos tk);
+			if !in_display_file && display_position#enclosed_in (pos tk) then syntax_completion SCComment (pos tk);
 			next_token()
 		| Sharp "end" ->
 			(match !mstack with
@@ -159,7 +179,7 @@ let parse ctx code file =
 		| Sharp "if" ->
 			skip_tokens_loop p test (skip_tokens p false)
 		| Eof ->
-			if !in_display then tk else error Unclosed_macro p
+			syntax_error Unclosed_conditional ~pos:(Some p) sraw tk
 		| _ ->
 			skip_tokens p test
 
@@ -173,10 +193,16 @@ let parse ctx code file =
 	) in
 	try
 		let l = parse_file s in
-		(match !mstack with p :: _ when not !in_display -> error Unclosed_macro p | _ -> ());
+		(match !mstack with p :: _ -> syntax_error Unclosed_conditional ~pos:(Some p) sraw () | _ -> ());
+		let was_display_file = !in_display_file in
 		restore();
 		Lexer.restore old;
-		l
+		if was_display_file then
+			ParseDisplayFile(l,List.rev !syntax_errors)
+		else begin match List.rev !syntax_errors with
+			| [] -> ParseSuccess l
+			| error :: errors -> ParseError(l,error,errors)
+		end
 	with
 		| Stream.Error _
 		| Stream.Failure ->
@@ -192,27 +218,27 @@ let parse ctx code file =
 let parse_string com s p error inlined =
 	let old = Lexer.save() in
 	let old_file = (try Some (Hashtbl.find Lexer.all_files p.pfile) with Not_found -> None) in
-	let old_display = !display_position in
-	let old_de = !display_error in
+	let old_display = display_position#get in
 	let old_in_display_file = !in_display_file in
+	let old_syntax_errors = !syntax_errors in
+	syntax_errors := [];
 	let restore() =
 		(match old_file with
 		| None -> ()
 		| Some f -> Hashtbl.replace Lexer.all_files p.pfile f);
 		if not inlined then begin
-			display_position := old_display;
+			display_position#set old_display;
 			in_display_file := old_in_display_file;
 		end;
-		Lexer.restore old;
-		display_error := old_de
+		syntax_errors := old_syntax_errors;
+		Lexer.restore old
 	in
 	Lexer.init p.pfile true;
-	display_error := (fun e p -> raise (Error (e,p)));
 	if not inlined then begin
-		display_position := null_pos;
+		display_position#reset;
 		in_display_file := false;
 	end;
-	let pack, decls = try
+	let result = try
 		parse com (Sedlexing.Utf8.from_string s) p.pfile
 	with Error (e,pe) ->
 		restore();
@@ -222,12 +248,17 @@ let parse_string com s p error inlined =
 		error (Lexer.error_msg e) (if inlined then pe else p)
 	in
 	restore();
-	pack,decls
+	result
 
 let parse_expr_string com s p error inl =
 	let head = "class X{static function main() " in
 	let head = (if p.pmin > String.length head then head ^ String.make (p.pmin - String.length head) ' ' else head) in
 	let rec loop e = let e = Ast.map_expr loop e in (fst e,p) in
+	let extract_expr (_,decls) = match decls with
+		| [EClass { d_data = [{ cff_name = "main",null_pos; cff_kind = FFun { f_expr = Some e } }]},_] -> (if inl then e else loop e)
+		| _ -> raise Exit
+	in
 	match parse_string com (head ^ s ^ ";}") p error inl with
-	| _,[EClass { d_data = [{ cff_name = "main",null_pos; cff_kind = FFun { f_expr = Some e } }]},_] -> if inl then e else loop e
-	| _ -> raise Exit
+	| ParseSuccess data -> ParseSuccess(extract_expr data)
+	| ParseError(data,error,errors) -> ParseError(extract_expr data,error,errors)
+	| ParseDisplayFile(data,errors) -> ParseDisplayFile(extract_expr data,errors)

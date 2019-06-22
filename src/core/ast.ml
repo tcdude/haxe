@@ -479,7 +479,7 @@ let s_token = function
 	| At -> "@"
 	| Dollar v -> "$" ^ v
 
-exception Invalid_escape_sequence of char * int
+exception Invalid_escape_sequence of char * int * (string option)
 
 let unescape s =
 	let b = Buffer.create 0 in
@@ -488,7 +488,7 @@ let unescape s =
 			()
 		else
 			let c = s.[i] in
-			let fail () = raise (Invalid_escape_sequence(c,i)) in
+			let fail msg = raise (Invalid_escape_sequence(c,i,msg)) in
 			if esc then begin
 				let inext = ref (i + 1) in
 				(match c with
@@ -497,14 +497,19 @@ let unescape s =
 				| 't' -> Buffer.add_char b '\t'
 				| '"' | '\'' | '\\' -> Buffer.add_char b c
 				| '0'..'3' ->
-					let c = (try char_of_int (int_of_string ("0o" ^ String.sub s i 3)) with _ -> fail()) in
+					let c = (try char_of_int (int_of_string ("0o" ^ String.sub s i 3)) with _ -> fail None) in
 					Buffer.add_char b c;
 					inext := !inext + 2;
 				| 'x' ->
-					let u = (try (int_of_string ("0x" ^ String.sub s (i+1) 2)) with _ -> fail()) in
+					let fail_no_hex () = fail (Some "Must be followed by a hexadecimal sequence.") in
+					let hex = try String.sub s (i+1) 2 with _ -> fail_no_hex () in
+					let u = (try (int_of_string ("0x" ^ hex)) with _ -> fail_no_hex ()) in
+					if u > 127 then
+						fail (Some ("Values greater than \\x7f are not allowed. Use \\u00" ^ hex ^ " instead."));
 					UTF8.add_uchar b (UChar.uchar_of_int u);
 					inext := !inext + 2;
 				| 'u' ->
+					let fail_no_hex () = fail (Some "Must be followed by a hexadecimal sequence enclosed in curly brackets.") in
 					let (u, a) =
 						try
 							(int_of_string ("0x" ^ String.sub s (i+1) 4), 4)
@@ -512,15 +517,19 @@ let unescape s =
 							assert (s.[i+1] = '{');
 							let l = String.index_from s (i+3) '}' - (i+2) in
 							let u = int_of_string ("0x" ^ String.sub s (i+2) l) in
-							assert (u <= 0x10FFFF);
+							if u > 0x10FFFF then
+								fail (Some "Maximum allowed value for unicode escape sequence is \\u{10FFFF}");
 							(u, l+2)
-						with _ ->
-							fail()
+						with
+							| Invalid_escape_sequence (c,i,msg) as e -> raise e
+							| _ -> fail_no_hex ()
 					in
+					if u >= 0xD800 && u < 0xE000 then
+						fail (Some "UTF-16 surrogates are not allowed in strings.");
 					UTF8.add_uchar b (UChar.uchar_of_int u);
 					inext := !inext + a;
 				| _ ->
-					fail());
+					fail None);
 				loop false !inext;
 			end else
 				match c with
@@ -709,7 +718,7 @@ let s_display_kind = function
 	| DKMarked -> "DKMarked"
 	| DKPattern _ -> "DKPattern"
 
-let s_expr e =
+module Printer = struct
 	let rec s_expr_inner tabs (e,_) =
 		match e with
 		| EConst c -> s_constant c
@@ -824,7 +833,9 @@ let s_expr e =
 		| (EBlock [],_) -> ""
 		| (EBlock el,_) -> s_block (tabs ^ "\t") el "" "" ""
 		| _ -> s_expr_inner (tabs ^ "\t") e ^ ";"
-	in s_expr_inner "" e
+
+	let s_expr e = s_expr_inner "" e
+end
 
 let get_value_meta meta =
 	try
@@ -953,11 +964,12 @@ module Expr = struct
 				loop e1
 			| EVars vl ->
 				add "EVars";
-				List.iter (fun ((n,p),_,_,eo) -> match eo with
+				List.iter (fun ((n,p),_,cto,eo) ->
+					add (Printf.sprintf "%s  %s%s" tabs n (match cto with None -> "" | Some (ct,_) -> ":" ^ Printer.s_complex_type "" ct));
+					match eo with
 					| None -> ()
 					| Some e ->
-						add n;
-						loop' (Printf.sprintf "%s  " tabs) e
+						loop' (Printf.sprintf "%s      " tabs) e
 				) vl
 			| EFunction(so,f) ->
 				add "EFunction";

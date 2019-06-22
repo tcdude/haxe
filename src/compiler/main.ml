@@ -82,8 +82,10 @@ let error ctx msg p =
 
 let reserved_flags = [
 	"cross";"js";"lua";"neko";"flash";"php";"cpp";"cs";"java";"python";
-	"as3";"swc";"macro";"sys";"static";"utf16"
+	"as3";"swc";"macro";"sys";"static";"utf16";"haxe";"haxe_ver"
 	]
+
+let reserved_flag_namespaces = ["target"]
 
 let delete_file f = try Sys.remove f with _ -> ()
 
@@ -257,7 +259,9 @@ module Initialize = struct
 					old_flush()
 				);
 				Java.before_generate com;
-				add_std "java"; "java"
+				if defined com Define.Jvm then add_std "jvm";
+				add_std "java";
+				"java"
 			| Python ->
 				add_std "python";
 				if not (Common.defined com Define.PythonVersion) then
@@ -265,6 +269,7 @@ module Initialize = struct
 				"python"
 			| Hl ->
 				add_std "hl";
+				if not (Common.raw_defined com "hl_ver") then Define.raw_define_value com.defines "hl_ver" (try Std.input_file (Common.find_file com "hl/hl_version") with Not_found -> assert false);
 				"hl"
 			| Eval ->
 				add_std "eval";
@@ -316,7 +321,10 @@ let generate tctx ext xml_out interp swf_header =
 		| Cs ->
 			Gencs.generate,"cs"
 		| Java ->
-			Genjava.generate,"java"
+			if Common.defined com Jvm then
+				Genjvm.generate,"java"
+			else
+				Genjava.generate,"java"
 		| Python ->
 			Genpy.generate,"python"
 		| Hl ->
@@ -407,11 +415,7 @@ let rec process_params create pl =
 		| arg :: l ->
 			match List.rev (ExtString.String.nsplit arg ".") with
 			| "hxml" :: _ when (match acc with "-cmd" :: _ | "--cmd" :: _ -> false | _ -> true) ->
-				let acc, l =
-					(try
-						let parsed = parse_hxml arg in
-						if (List.mem "--" parsed) then raise (Arg.Bad "Rest arguments (--) are not allowed in hxml files") else (acc, parsed @ l)
-					with Not_found -> (arg ^ " (file not found)") :: acc, l) in
+				let acc, l = (try acc, parse_hxml arg @ l with Not_found -> (arg ^ " (file not found)") :: acc, l) in
 				loop acc l
 			| _ -> loop (arg :: acc) l
 	in
@@ -458,11 +462,13 @@ and usage_string ?(print_cat=true) arg_spec usage =
 and init ctx =
 	let usage = Printf.sprintf
 		"Haxe Compiler %s - (C)2005-2019 Haxe Foundation\nUsage: haxe%s <target> [options] [hxml files...]\n"
-		s_version (if Sys.os_type = "Win32" then ".exe" else "")
+		(s_version true) (if Sys.os_type = "Win32" then ".exe" else "")
 	in
 	let com = ctx.com in
 	let classes = ref [([],"Std")] in
 try
+	set_binary_mode_out stdout true;
+	set_binary_mode_out stderr true;
 	let xml_out = ref None in
 	let json_out = ref None in
 	let swf_header = ref None in
@@ -479,11 +485,11 @@ try
 	Common.define_value com Define.HaxeVer (Printf.sprintf "%.3f" (float_of_int Globals.version /. 1000.));
 	Common.raw_define com "haxe3";
 	Common.raw_define com "haxe4";
+	Common.define_value com Define.Haxe (s_version false);
 	Common.define_value com Define.Dce "std";
 	com.warning <- (fun msg p -> message ctx (CMWarning(msg,p)));
 	com.error <- error ctx;
 	if CompilationServer.runs() then com.run_command <- run_command ctx;
-	Parser.display_error := (fun e p -> com.error (Parser.error_msg e) p);
 	com.class_path <- get_std_class_paths ();
 	com.std_path <- List.filter (fun p -> ExtString.String.ends_with p "std/" || ExtString.String.ends_with p "std\\") com.class_path;
 	let define f = Arg.Unit (fun () -> Common.define com f) in
@@ -517,8 +523,8 @@ try
 			Initialize.set_platform com Cpp dir;
 		),"<directory>","generate C++ code into target directory");
 		("Target",["--cppia"],["-cppia"],Arg.String (fun file ->
-			Initialize.set_platform com Cpp file;
 			Common.define com Define.Cppia;
+			Initialize.set_platform com Cpp file;
 		),"<file>","generate Cppia code into target file");
 		("Target",["--cs"],["-cs"],Arg.String (fun dir ->
 			(*cp_libs := "hxcs" :: !cp_libs;*)
@@ -534,7 +540,7 @@ try
 		("Target",["--hl"],["-hl"],Arg.String (fun file ->
 			Initialize.set_platform com Hl file;
 		),"<file>","compile HL code as target file");
-		("Target",[],["-x";"--execute"], Arg.String (fun cl ->
+		("Target",[],["-x"], Arg.String (fun cl ->
 			let cpath = Path.parse_type_path cl in
 			(match com.main_class with
 				| Some c -> if cpath <> c then raise (Arg.Bad "Multiple --main classes specified")
@@ -565,7 +571,13 @@ try
 			Common.raw_define com l;
 		),"<name[:ver]>","use a haxelib library");
 		("Compilation",["-D";"--define"],[],Arg.String (fun var ->
-			if List.mem var reserved_flags then raise (Arg.Bad (var ^ " is a reserved compiler flag and cannot be defined from command line"));
+			let raise_reserved description =
+				raise (Arg.Bad (description ^ " and cannot be defined from the command line"))
+			in
+			if List.mem var reserved_flags then raise_reserved (Printf.sprintf "`%s` is a reserved compiler flag" var);
+			List.iter (fun ns ->
+				if ExtString.String.starts_with var (ns ^ ".") then raise_reserved (Printf.sprintf "`%s` uses the reserved compiler flag namespace `%s.*`" var ns)
+			) reserved_flag_namespaces;
 			Common.raw_define com var;
 		),"<var[=value]>","define a conditional compilation flag");
 		("Debug",["-v";"--verbose"],[],Arg.Unit (fun () ->
@@ -576,7 +588,7 @@ try
 			com.debug <- true;
 		),"","add debug information to the compiled code");
 		("Miscellaneous",["--version"],["-version"],Arg.Unit (fun() ->
-			message ctx (CMInfo(s_version,null_pos));
+			message ctx (CMInfo(s_version true,null_pos));
 			did_something := true;
 		),"","print version and exit");
 		("Miscellaneous", ["-h";"--help"], ["-help"], Arg.Unit (fun () ->
@@ -595,9 +607,6 @@ try
 			did_something := true
 		),"","print help for all compiler metadatas");
 		("Misc",["--run"],[], Arg.Unit (fun() -> assert false), "<module> [args...]","compile and execute a Haxe module with command line arguments");
-		("Miscellaneous",["--"],[], Arg.Rest (fun arg ->
-			com.sys_args <- com.sys_args @ [arg];
-		),"[args...]","args that will be passed to the macro interpreter");
 	] in
 	let adv_args_spec = [
 		("Optimization",["--dce"],["-dce"],Arg.String (fun mode ->
@@ -683,6 +692,8 @@ try
 		("Services",["--display"],[], Arg.String (fun input ->
 			let input = String.trim input in
 			if String.length input > 0 && (input.[0] = '[' || input.[0] = '{') then begin
+				did_something := true;
+				force_typing := true;
 				DisplayJson.parse_input com input measure_times
 			end else
 				DisplayOutput.handle_display_argument com input pre_compilation did_something;
@@ -693,23 +704,6 @@ try
 		("Services",["--json"],[],Arg.String (fun file ->
 			json_out := Some file
 		),"<file>","generate JSON types description");
-		("Services",["--gen-hx-classes"],[], Arg.Unit (fun() ->
-			force_typing := true;
-			pre_compilation := (fun() ->
-				List.iter (fun (_,_,extract) ->
-					Hashtbl.iter (fun n _ -> classes := n :: !classes) (extract())
-				) com.swf_libs;
-				List.iter (fun (_,std,_,all_files,_) ->
-					if not std then
-						List.iter (fun path -> if path <> (["java";"lang"],"String") then classes := path :: !classes) (all_files())
-				) com.java_libs;
-				List.iter (fun (_,std,all_files,_) ->
-					if not std then
-						List.iter (fun path -> classes := path :: !classes) (all_files())
-				) com.net_libs;
-			) :: !pre_compilation;
-			xml_out := Some "hx"
-		),"","generate hx headers for all input classes");
 		("Optimization",["--no-output"],[], Arg.Unit (fun() -> no_output := true),"","compiles but does not generate any file");
 		("Debug",["--times"],[], Arg.Unit (fun() -> measure_times := true),"","measure compilation times");
 		("Optimization",["--no-inline"],[], define Define.NoInline, "","disable inlining");
@@ -761,7 +755,16 @@ try
 	let process args =
 		let current = ref 0 in
 		(try
-			Arg.parse_argv ~current (Array.of_list ("" :: List.map expand_env args)) all_args_spec args_callback "";
+			let rec loop acc args = match args with
+				| "--display" :: arg :: args ->
+					loop (arg :: "--display" :: acc) args
+				| arg :: args ->
+					loop (expand_env arg :: acc) args
+				| [] ->
+					List.rev acc
+			in
+			let args = loop [] args in
+			Arg.parse_argv ~current (Array.of_list ("" :: args)) all_args_spec args_callback "";
 			List.iter (fun fn -> fn()) !arg_delays
 		with
 		| Arg.Help _ ->
@@ -786,7 +789,28 @@ try
 				end;
 			with Not_found ->
 				raise (Arg.Bad new_msg));
-		arg_delays := []
+		arg_delays := [];
+		if com.platform = Globals.Cpp && not (Define.defined com.defines DisableUnicodeStrings) && not (Define.defined com.defines HxcppSmartStings) then begin
+			Define.define com.defines HxcppSmartStings;
+		end;
+		if Define.raw_defined com.defines "gen_hx_classes" then begin
+			(* TODO: this is something we're gonna remove once we have something nicer for generating flash externs *)
+			force_typing := true;
+			pre_compilation := (fun() ->
+				List.iter (fun (_,_,extract) ->
+					Hashtbl.iter (fun n _ -> classes := n :: !classes) (extract())
+				) com.swf_libs;
+				List.iter (fun (_,std,_,all_files,_) ->
+					if not std then
+						List.iter (fun path -> if path <> (["java";"lang"],"String") then classes := path :: !classes) (all_files())
+				) com.java_libs;
+				List.iter (fun (_,std,all_files,_) ->
+					if not std then
+						List.iter (fun path -> classes := path :: !classes) (all_files())
+				) com.net_libs;
+			) :: !pre_compilation;
+			xml_out := Some "hx"
+		end;
 	in
 	process_ref := process;
 	process ctx.com.args;
@@ -794,19 +818,19 @@ try
 	if com.display.dms_kind <> DMNone then begin
 		com.warning <-
 			if com.display.dms_error_policy = EPCollect then
-				(fun s p -> add_diagnostics_message com s p DisplayTypes.DiagnosticsSeverity.Warning)
+				(fun s p -> add_diagnostics_message com s p DKCompilerError DisplayTypes.DiagnosticsSeverity.Warning)
 			else
 				(fun msg p -> message ctx (CMWarning(msg,p)));
 		com.error <- error ctx;
 	end;
 	Lexer.old_format := Common.defined com Define.OldErrorFormat;
 	if !Lexer.old_format && !Parser.in_display then begin
-		let p = !DisplayPosition.display_position in
+		let p = DisplayPosition.display_position#get in
 		(* convert byte position to utf8 position *)
 		try
 			let content = Std.input_file ~bin:true (Path.get_real_path p.pfile) in
 			let pos = UTF8.length (String.sub content 0 p.pmin) in
-			DisplayPosition.display_position := { p with pmin = pos; pmax = pos }
+			DisplayPosition.display_position#set { p with pmin = pos; pmax = pos }
 		with _ ->
 			() (* ignore *)
 	end;
@@ -821,6 +845,26 @@ try
 	let t = Timer.timer ["init"] in
 	List.iter (fun f -> f()) (List.rev (!pre_compilation));
 	t();
+	let run_or_diagnose f arg =
+		let handle_diagnostics global msg p kind =
+			add_diagnostics_message com msg p kind DisplayTypes.DiagnosticsSeverity.Error;
+			Diagnostics.run com global;
+		in
+		match com.display.dms_kind with
+		| DMDiagnostics global ->
+			begin try
+				f arg
+			with
+			| Error.Error(msg,p) ->
+				handle_diagnostics global (Error.error_msg msg) p DisplayTypes.DiagnosticsKind.DKCompilerError
+			| Parser.Error(msg,p) ->
+				handle_diagnostics global (Parser.error_msg msg) p DisplayTypes.DiagnosticsKind.DKParserError
+			| Lexer.Error(msg,p) ->
+				handle_diagnostics global (Lexer.error_msg msg) p DisplayTypes.DiagnosticsKind.DKParserError
+			end
+		| _ ->
+			f arg
+	in
 	if !classes = [([],"Std")] && not !force_typing then begin
 		if !cmds = [] && not !did_something then raise (HelpMessage (usage_string basic_args_spec usage));
 	end else begin
@@ -830,16 +874,17 @@ try
 		let t = Timer.timer ["typing"] in
 		Typecore.type_expr_ref := (fun ctx e with_type -> Typer.type_expr ctx e with_type);
 		let tctx = Typer.create com in
+		let add_signature desc =
+			Option.may (fun cs -> CompilationServer.maybe_add_context_sign cs com desc) (CompilationServer.get ());
+		in
+		add_signature "before_init_macros";
 		List.iter (MacroContext.call_init_macro tctx) (List.rev !config_macros);
+		add_signature "after_init_macros";
 		List.iter (fun f -> f ()) (List.rev com.callbacks#get_after_init_macros);
-		begin match CompilationServer.get () with
-		| None -> ()
-		| Some cs ->
-			let sign = Define.get_signature com.defines in
-			try ignore(CompilationServer.get_sign cs sign) with Not_found -> ignore(CompilationServer.add_sign cs sign com)
-		end;
-		List.iter (fun cpath -> ignore(tctx.Typecore.g.Typecore.do_load_module tctx cpath null_pos)) (List.rev !classes);
-		Finalization.finalize tctx;
+		run_or_diagnose (fun () ->
+			List.iter (fun cpath -> ignore(tctx.Typecore.g.Typecore.do_load_module tctx cpath null_pos)) (List.rev !classes);
+			Finalization.finalize tctx;
+		) ();
 		(* If we are trying to find references, let's syntax-explore everything we know to check for the
 		   identifier we are interested in. We then type only those modules that contain the identifier. *)
 		begin match !CompilationServer.instance,com.display.dms_kind with
@@ -892,11 +937,14 @@ try
 			failwith "No completion point was found";
 		end;
 		let t = Timer.timer ["filters"] in
-		let main, types, modules = Finalization.generate tctx in
+		let main, types, modules = run_or_diagnose Finalization.generate tctx in
 		com.main <- main;
 		com.types <- types;
 		com.modules <- modules;
-		if ctx.com.display.dms_force_macro_typing then begin match load_display_module_in_macro false with
+		(* Special case for diagnostics: We don't want to load the display file in macro mode because there's a chance it might not be
+		   macro-compatible. This means that we might some macro-specific diagnostics, but I don't see what we could do about that. *)
+		if ctx.com.display.dms_force_macro_typing && (match ctx.com.display.dms_kind with DMDiagnostics _ -> false | _ -> true) then begin
+			match load_display_module_in_macro false with
 			| None -> ()
 			| Some mctx ->
 				(* We don't need a full macro flush here because we're not going to run any macros. *)
@@ -913,7 +961,7 @@ try
 		begin match !xml_out with
 			| None -> ()
 			| Some "hx" ->
-				Genxml.generate_hx com
+				Genhxold.generate com
 			| Some file ->
 				Common.log com ("Generating xml: " ^ file);
 				Path.mkdir_from_path file;
@@ -966,11 +1014,13 @@ with
 	| HelpMessage msg ->
 		message ctx (CMInfo(msg,null_pos))
 	| DisplayException(DisplayHover _ | DisplayPosition _ | DisplayFields _ | DisplayPackage _  | DisplaySignatures _ as de) when ctx.com.json_out <> None ->
-		begin match ctx.com.json_out with
-		| Some (f,_) ->
-			let ctx = DisplayJson.create_json_context (match de with DisplayFields _ -> true | _ -> false) in
-			f (DisplayException.to_json ctx de)
-		| _ -> assert false
+		begin
+			DisplayPosition.display_position#reset;
+			match ctx.com.json_out with
+			| Some (f,_,jsonrpc) ->
+				let ctx = DisplayJson.create_json_context jsonrpc (match de with DisplayFields _ -> true | _ -> false) in
+				f (DisplayException.to_json ctx de)
+			| _ -> assert false
 		end
 	(* | Parser.TypePath (_,_,_,p) when ctx.com.json_out <> None ->
 		begin match com.json_out with
@@ -982,8 +1032,10 @@ with
 		| _ -> assert false
 		end *)
 	| DisplayException(DisplayPackage pack) ->
+		DisplayPosition.display_position#reset;
 		raise (DisplayOutput.Completion (String.concat "." pack))
 	| DisplayException(DisplayFields(fields,cr,_)) ->
+		DisplayPosition.display_position#reset;
 		let fields = if !measure_times then begin
 			Timer.close_times();
 			(List.map (fun (name,value) ->
@@ -1013,14 +1065,17 @@ with
 		in
 		raise (DisplayOutput.Completion s)
 	| DisplayException(DisplayHover ({hitem = {CompletionItem.ci_type = Some (t,_)}} as hover)) ->
+		DisplayPosition.display_position#reset;
 		let doc = CompletionItem.get_documentation hover.hitem in
 		raise (DisplayOutput.Completion (DisplayOutput.print_type t hover.hpos doc))
 	| DisplayException(DisplaySignatures(signatures,_,display_arg,_)) ->
+		DisplayPosition.display_position#reset;
 		if ctx.com.display.dms_kind = DMSignature then
 			raise (DisplayOutput.Completion (DisplayOutput.print_signature signatures display_arg))
 		else
 			raise (DisplayOutput.Completion (DisplayOutput.print_signatures signatures))
 	| DisplayException(DisplayPosition pl) ->
+		DisplayPosition.display_position#reset;
 		raise (DisplayOutput.Completion (DisplayOutput.print_positions pl))
 	| Parser.TypePath (p,c,is_import,pos) ->
 		let fields =
@@ -1037,13 +1092,13 @@ with
 		| None -> ()
 		| Some fields ->
 			begin match ctx.com.json_out with
-			| Some (f,_) ->
-				let ctx = DisplayJson.create_json_context false in
+			| Some (f,_,jsonrpc) ->
+				let ctx = DisplayJson.create_json_context jsonrpc false in
 				let path = match List.rev p with
 					| name :: pack -> List.rev pack,name
 					| [] -> [],""
 				in
-				let kind = CRField ((CompletionItem.make_ci_module path,pos)) in
+				let kind = CRField ((CompletionItem.make_ci_module path,pos,None,None)) in
 				f (DisplayException.fields_to_json ctx fields kind None);
 			| _ -> raise (DisplayOutput.Completion (DisplayOutput.print_fields fields))
 			end
@@ -1052,6 +1107,7 @@ with
 		DisplayOutput.handle_syntax_completion com kind pos;
 		error ctx ("Error: No completion point was found") null_pos
 	| DisplayException(ModuleSymbols s | Diagnostics s | Statistics s | Metadata s) ->
+		DisplayPosition.display_position#reset;
 		raise (DisplayOutput.Completion s)
 	| EvalExceptions.Sys_exit i | Hlinterp.Sys_exit i ->
 		ctx.flush();
