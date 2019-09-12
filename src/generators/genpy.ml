@@ -1104,7 +1104,7 @@ module Printer = struct
 	let print_base_type tp =
 		try
 			begin match Meta.get Meta.Native tp.mt_meta with
-				| _,[EConst(String s),_],_ -> s
+				| _,[EConst(String(s,_)),_],_ -> s
 				| _ -> raise Not_found
 			end
 		with Not_found ->
@@ -1145,7 +1145,7 @@ module Printer = struct
 						| None -> ""
 						| Some ct ->
 							had_value := true;
-							Printf.sprintf " = %s" (print_expr pctx ct)
+							" = None"
 		) args in
 		String.concat "," sl
 
@@ -1648,7 +1648,7 @@ module Printer = struct
 					if Meta.has Meta.Native cf.cf_meta then begin
 						let _, args, mp = Meta.get Meta.Native cf.cf_meta in
 						match args with
-						| [( EConst(String s),_)] -> PMap.add f s acc
+						| [( EConst(String(s,_)),_)] -> PMap.add f s acc
 						| _ -> acc
 					end else acc
 				in
@@ -1880,7 +1880,7 @@ module Generator = struct
 	let gen_py_metas ctx metas indent =
 		List.iter (fun (n,el,_) ->
 			match el with
-				| [EConst(String s),_] ->
+				| [EConst(String(s,_)),_] ->
 					print ctx "%s@%s\n" indent s
 				| _ ->
 					assert false
@@ -2251,10 +2251,14 @@ module Generator = struct
 		List.iter (fun ef ->
 			match follow ef.ef_type with
 			| TFun(args, _) ->
+				let arg_name hx_name =
+					let name = handle_keywords hx_name in
+					if name = p_name then p_name ^ "_" ^ name
+					else name
+				in
 				let print_args args =
 					let had_optional = ref false in
 					let sl = List.map (fun (n,o,_) ->
-						let name = handle_keywords n in
 						let arg_value = if !had_optional then
 							"= None"
 						else if o then begin
@@ -2263,17 +2267,21 @@ module Generator = struct
 						end else
 							""
 						in
-						Printf.sprintf "%s%s" name arg_value
+						Printf.sprintf "%s%s" (arg_name n) arg_value
 					) args in
 					String.concat "," sl
 				in
 				let f = handle_keywords ef.ef_name in
 				let param_str = print_args args in
-				let args_str = String.concat "," (List.map (fun (n,_,_) -> handle_keywords n) args) in
+				let args_str =
+					match args with
+					| [(n,_,_)] -> (arg_name n) ^ ","
+					| args -> String.concat "," (List.map (fun (n,_,_) -> arg_name n) args)
+				in
 				newline ctx;
 				newline ctx;
 				print ctx "    @staticmethod\n    def %s(%s):\n" f param_str;
-				print ctx "        return %s(\"%s\", %i, [%s])" p ef.ef_name ef.ef_index args_str;
+				print ctx "        return %s(\"%s\", %i, (%s))" p ef.ef_name ef.ef_index args_str;
 			| _ -> assert false
 		) param_constructors;
 
@@ -2281,7 +2289,7 @@ module Generator = struct
 			(* TODO: haxe source has api.quoteString for ef.ef_name *)
 			let f = handle_keywords ef.ef_name in
 			newline ctx;
-			print ctx "%s.%s = %s(\"%s\", %i, list())" p f p ef.ef_name ef.ef_index
+			print ctx "%s.%s = %s(\"%s\", %i, ())" p f p ef.ef_name ef.ef_index
 		) const_constructors;
 
 		if has_feature ctx "python._hx_class" then print ctx "\n%s._hx_class = %s" p p;
@@ -2361,18 +2369,18 @@ module Generator = struct
 				in
 
 				let import_type,ignore_error = match args with
-					| [(EConst(String(module_name)), _)]
-					| [(EConst(String(module_name)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("false")),_)),_)] ->
+					| [(EConst(String(module_name,_)), _)]
+					| [(EConst(String(module_name,_)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("false")),_)),_)] ->
 						IModule module_name, false
 
-					| [(EConst(String(module_name)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("true")),_)),_)] ->
+					| [(EConst(String(module_name,_)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("true")),_)),_)] ->
 						IModule module_name,true
 
-					| [(EConst(String(module_name)), _); (EConst(String(object_name)), _)]
-					| [(EConst(String(module_name)), _); (EConst(String(object_name)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("false")),_)),_)] ->
+					| [(EConst(String(module_name,_)), _); (EConst(String(object_name,_)), _)]
+					| [(EConst(String(module_name,_)), _); (EConst(String(object_name,_)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("false")),_)),_)] ->
 						IObject (module_name,object_name), false
 
-					| [(EConst(String(module_name)), _); (EConst(String(object_name)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("true")),_)),_)] ->
+					| [(EConst(String(module_name,_)), _); (EConst(String(object_name,_)), _); (EBinop(OpAssign, (EConst(Ident("ignoreError")),_), (EConst(Ident("true")),_)),_)] ->
 						IObject (module_name,object_name), true
 					| _ ->
 						abort "Unsupported @:pythonImport format" mp

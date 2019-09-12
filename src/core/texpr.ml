@@ -314,7 +314,7 @@ let type_constant basic c p =
 		(try mk (TConst (TInt (Int32.of_string s))) basic.tint p
 		with _ -> mk (TConst (TFloat s)) basic.tfloat p)
 	| Float f -> mk (TConst (TFloat f)) basic.tfloat p
-	| String s -> mk (TConst (TString s)) basic.tstring p
+	| String(s,qs) -> mk (TConst (TString s)) basic.tstring p (* STRINGTODO: qs? *)
 	| Ident "true" -> mk (TConst (TBool true)) basic.tbool p
 	| Ident "false" -> mk (TConst (TBool false)) basic.tbool p
 	| Ident "null" -> mk (TConst TNull) (basic.tnull (mk_mono())) p
@@ -533,3 +533,26 @@ let collect_captured_vars e =
 	in
 	loop e;
 	List.rev !unknown,!accesses_this
+
+(**
+	If `e` contains a sequence of unsafe casts, then look if that sequence
+	already has casts to `t` and return the bottom-most of such casts.
+	If `require_cast` is `false` and the first non-cast expression has type `t`, then return that expression without any casts.
+	In other cases return `e` as-is.
+*)
+let reduce_unsafe_casts ?(require_cast=false) e t =
+	let same_type t1 t2 =
+		fast_eq (follow_without_null t1) (follow_without_null t2)
+	in
+	let rec loop e =
+		match e.eexpr with
+		| TCast(subject,None) ->
+			let result = loop subject in
+			if same_type e.etype subject.etype then result
+			else { e with eexpr = TCast(result,None) }
+		| _ -> e
+	in
+	match loop e with
+	| { eexpr = TCast _ } as result -> result
+	| result when require_cast -> { e with eexpr = TCast(result,None) }
+	| result -> result

@@ -332,7 +332,7 @@ and module_def = {
 
 and module_def_display = {
 	mutable m_inline_calls : (pos * pos) list; (* calls whatever is at pos1 from pos2 *)
-	mutable m_type_hints : (pos * t) list;
+	mutable m_type_hints : (pos * pos) list;
 }
 
 and module_def_extra = {
@@ -341,7 +341,7 @@ and module_def_extra = {
 	m_display : module_def_display;
 	mutable m_check_policy : module_check_policy list;
 	mutable m_time : float;
-	mutable m_dirty : module_def option;
+	mutable m_dirty : path option;
 	mutable m_added : int;
 	mutable m_mark : int;
 	mutable m_deps : (int,module_def) PMap.t;
@@ -383,7 +383,7 @@ type flag_tclass_field =
 	| CfPublic
 	| CfExtern (* This is only set if the field itself is extern, not just the class. *)
 	| CfFinal
-	| CfOverridden
+	| CfModifiesThis (* This is set for methods which reassign `this`. E.g. `this = value` *)
 
 (* Flags *)
 
@@ -633,7 +633,7 @@ let map loop t =
 	| TDynamic t2 ->
 		if t == t2 then	t else TDynamic (loop t2)
 
-let dup t =
+let duplicate t =
 	let monos = ref [] in
 	let rec loop t =
 		match t with
@@ -649,8 +649,10 @@ let dup t =
 	in
 	loop t
 
+exception ApplyParamsRecursion
+
 (* substitute parameters with other types *)
-let apply_params cparams params t =
+let apply_params ?stack cparams params t =
 	match cparams with
 	| [] -> t
 	| _ ->
@@ -678,7 +680,52 @@ let apply_params cparams params t =
 		| TType (t2,tl) ->
 			(match tl with
 			| [] -> t
-			| _ -> TType (t2,List.map loop tl))
+			| _ ->
+				let new_applied_params = List.map loop tl in
+				(match stack with
+				| None -> ()
+				| Some stack ->
+					List.iter (fun (subject, old_applied_params) ->
+						(*
+							E.g.:
+							```
+							typedef Rec<T> = { function method():Rec<Array<T>> }
+							```
+							We need to make sure that we are not applying the result of previous
+							application to the same place, which would mean the result of current
+							application would go into `apply_params` again and then again and so on.
+
+							Argument `stack` holds all previous results of `apply_params` to typedefs in current
+							unification process.
+
+							Imagine we are trying to unify `Rec<Int>` with something.
+
+							Once `apply_params Array<T> Int Rec<Array<T>>` is called for the first time the result
+							will be `Rec< Array<Int> >`. Store `Array<Int>` into `stack`
+
+							Then the next params application looks like this:
+								`apply_params Array<T> Array<Int> Rec<Array<T>>`
+							Notice the second argument is actually the result of a previous `apply_params` call.
+							And the result of the current call is `Rec< Array<Array<Int>> >`.
+
+							The third call would be:
+								`apply_params Array<T> Array<Array<Int>> Rec<Array<T>>`
+							and so on.
+
+							To stop infinite params application we need to check that we are trying to apply params
+							produced by the previous `apply_params Array<Int> _ Rec<Array<T>>` to the same `Rec<Array<T>>`
+						*)
+						if
+							subject == t (* Check the place that we're applying to is the same `Rec<Array<T>>` *)
+							&& old_applied_params == params (* Check that params we're applying are the same params
+																produced by the previous call to
+																`apply_params Array<T> _ Rec<Array<T>>` *)
+						then
+							raise ApplyParamsRecursion
+					) !stack;
+					stack := (t, new_applied_params) :: !stack;
+				);
+				TType (t2,new_applied_params))
 		| TAbstract (a,tl) ->
 			(match tl with
 			| [] -> t
@@ -730,6 +777,21 @@ let apply_params cparams params t =
 let monomorphs eparams t =
 	apply_params eparams (List.map (fun _ -> mk_mono()) eparams) t
 
+let apply_params_stack = ref []
+
+let try_apply_params_rec cparams params t success =
+	let old_stack = !apply_params_stack in
+	try
+		let result = success (apply_params ~stack:apply_params_stack cparams params t) in
+		apply_params_stack := old_stack;
+		result
+	with
+		| ApplyParamsRecursion ->
+			apply_params_stack := old_stack;
+		| err ->
+			apply_params_stack := old_stack;
+			raise err
+
 let rec follow t =
 	match t with
 	| TMono r ->
@@ -743,6 +805,41 @@ let rec follow t =
 	| TAbstract({a_path = [],"Null"},[t]) ->
 		follow t
 	| _ -> t
+
+let rec follow_without_null t =
+	match t with
+	| TMono r ->
+		(match !r with
+		| Some t -> follow_without_null t
+		| _ -> t)
+	| TLazy f ->
+		follow_without_null (lazy_type f)
+	| TType (t,tl) ->
+		follow_without_null (apply_params t.t_params tl t.t_type)
+	| _ -> t
+
+(** Assumes `follow` has already been applied *)
+let rec ambiguate_funs t =
+	match t with
+	| TFun _ -> TFun ([], t_dynamic)
+	| TMono r ->
+		(match !r with
+		| Some _ -> assert false
+		| _ -> t)
+	| TInst (a, pl) ->
+	    TInst (a, List.map ambiguate_funs pl)
+	| TEnum (a, pl) ->
+	    TEnum (a, List.map ambiguate_funs pl)
+	| TAbstract (a, pl) ->
+	    TAbstract (a, List.map ambiguate_funs pl)
+	| TType (a, pl) ->
+	    TType (a, List.map ambiguate_funs pl)
+	| TDynamic _ -> t
+	| TAnon a ->
+	    TAnon { a with a_fields =
+		    PMap.map (fun af -> { af with cf_type =
+				ambiguate_funs af.cf_type }) a.a_fields }
+	| TLazy _ -> assert false
 
 let rec is_nullable = function
 	| TMono r ->
@@ -843,7 +940,7 @@ let rec module_type_of_type = function
 let tconst_to_const = function
 	| TInt i -> Int (Int32.to_string i)
 	| TFloat s -> Float s
-	| TString s -> String s
+	| TString s -> String(s,SDoubleQuotes)
 	| TBool b -> Ident (if b then "true" else "false")
 	| TNull -> Ident "null"
 	| TThis -> Ident "this"
@@ -1578,7 +1675,7 @@ module Printer = struct
 			"m_file",me.m_file;
 			"m_sign",me.m_sign;
 			"m_time",string_of_float me.m_time;
-			"m_dirty",s_opt (fun m -> s_type_path m.m_path) me.m_dirty;
+			"m_dirty",s_opt s_type_path me.m_dirty;
 			"m_added",string_of_int me.m_added;
 			"m_mark",string_of_int me.m_mark;
 			"m_deps",s_pmap string_of_int (fun m -> snd m.m_path) me.m_deps;
@@ -1661,46 +1758,91 @@ let rec link e a b =
 		true
 	end
 
+let would_produce_recursive_anon field_acceptor field_donor =
+	try
+		(match !(field_acceptor.a_status) with
+		| Opened ->
+			PMap.iter (fun n field ->
+				match follow field.cf_type with
+				| TAnon a when field_acceptor == a -> raise Exit
+				| _ -> ()
+			) field_donor.a_fields;
+		| _ -> ());
+		false
+	with Exit -> true
+
 let link_dynamic a b = match follow a,follow b with
 	| TMono r,TDynamic _ -> r := Some b
 	| TDynamic _,TMono r -> r := Some a
 	| _ -> ()
 
-let rec fast_eq a b =
+let fast_eq_check type_param_check a b =
 	if a == b then
 		true
 	else match a , b with
 	| TFun (l1,r1) , TFun (l2,r2) when List.length l1 = List.length l2 ->
-		List.for_all2 (fun (_,_,t1) (_,_,t2) -> fast_eq t1 t2) l1 l2 && fast_eq r1 r2
+		List.for_all2 (fun (_,_,t1) (_,_,t2) -> type_param_check t1 t2) l1 l2 && type_param_check r1 r2
 	| TType (t1,l1), TType (t2,l2) ->
-		t1 == t2 && List.for_all2 fast_eq l1 l2
+		t1 == t2 && List.for_all2 type_param_check l1 l2
 	| TEnum (e1,l1), TEnum (e2,l2) ->
-		e1 == e2 && List.for_all2 fast_eq l1 l2
+		e1 == e2 && List.for_all2 type_param_check l1 l2
 	| TInst (c1,l1), TInst (c2,l2) ->
-		c1 == c2 && List.for_all2 fast_eq l1 l2
+		c1 == c2 && List.for_all2 type_param_check l1 l2
 	| TAbstract (a1,l1), TAbstract (a2,l2) ->
-		a1 == a2 && List.for_all2 fast_eq l1 l2
+		a1 == a2 && List.for_all2 type_param_check l1 l2
 	| _ , _ ->
 		false
 
+let rec fast_eq a b = fast_eq_check fast_eq a b
+
 let rec fast_eq_mono ml a b =
-	if a == b then
+	if fast_eq_check (fast_eq_mono ml) a b then
 		true
 	else match a , b with
-	| TFun (l1,r1) , TFun (l2,r2) when List.length l1 = List.length l2 ->
-		List.for_all2 (fun (_,_,t1) (_,_,t2) -> fast_eq_mono ml t1 t2) l1 l2 && fast_eq_mono ml r1 r2
-	| TType (t1,l1), TType (t2,l2) ->
-		t1 == t2 && List.for_all2 (fast_eq_mono ml) l1 l2
-	| TEnum (e1,l1), TEnum (e2,l2) ->
-		e1 == e2 && List.for_all2 (fast_eq_mono ml) l1 l2
-	| TInst (c1,l1), TInst (c2,l2) ->
-		c1 == c2 && List.for_all2 (fast_eq_mono ml) l1 l2
-	| TAbstract (a1,l1), TAbstract (a2,l2) ->
-		a1 == a2 && List.for_all2 (fast_eq_mono ml) l1 l2
 	| TMono _, _ ->
 		List.memq a ml
 	| _ , _ ->
 		false
+
+let rec shallow_eq a b =
+	a == b
+	|| begin
+		let a = follow a
+		and b = follow b in
+		fast_eq_check shallow_eq a b
+		|| match a , b with
+			| t, TMono { contents = None } when t == t_dynamic -> true
+			| TMono { contents = None }, t when t == t_dynamic -> true
+			| TMono { contents = None }, TMono { contents = None } -> true
+			| TAnon a1, TAnon a2 ->
+				let fields_eq() =
+					let rec loop fields1 fields2 =
+						match fields1, fields2 with
+						| [], [] -> true
+						| _, [] | [], _ -> false
+						| f1 :: rest1, f2 :: rest2 ->
+							f1.cf_name = f2.cf_name
+							&& (try shallow_eq f1.cf_type f2.cf_type with Not_found -> false)
+							&& loop rest1 rest2
+					in
+					let fields1 = PMap.fold (fun field fields -> field :: fields) a1.a_fields []
+					and fields2 = PMap.fold (fun field fields -> field :: fields) a2.a_fields []
+					and sort_compare f1 f2 = compare f1.cf_name f2.cf_name in
+					loop (List.sort sort_compare fields1) (List.sort sort_compare fields2)
+				in
+				(match !(a2.a_status), !(a1.a_status) with
+				| Statics c, Statics c2 -> c == c2
+				| EnumStatics e, EnumStatics e2 -> e == e2
+				| AbstractStatics a, AbstractStatics a2 -> a == a2
+				| Extend tl1, Extend tl2 -> fields_eq() && List.for_all2 shallow_eq tl1 tl2
+				| Closed, Closed -> fields_eq()
+				| Opened, Opened -> fields_eq()
+				| Const, Const -> fields_eq()
+				| _ -> false
+				)
+			| _ , _ ->
+				false
+	end
 
 (* perform unification with subtyping.
    the first type is always the most down in the class hierarchy
@@ -1901,6 +2043,7 @@ let rec type_eq param a b =
 			| AbstractStatics a -> (match !(a1.a_status) with AbstractStatics a2 when a == a2 -> () | _ -> error [])
 			| _ -> ()
 			);
+			if would_produce_recursive_anon a1 a2 || would_produce_recursive_anon a2 a1 then error [cannot_unify a b];
 			PMap.iter (fun n f1 ->
 				try
 					let f2 = PMap.find n a2.a_fields in
@@ -1987,12 +2130,12 @@ let rec unify a b =
 	| TType (t,tl) , _ ->
 		rec_stack unify_stack (a,b)
 			(fun(a2,b2) -> fast_eq a a2 && fast_eq b b2)
-			(fun() -> unify (apply_params t.t_params tl t.t_type) b)
+			(fun() -> try_apply_params_rec t.t_params tl t.t_type (fun a -> unify a b))
 			(fun l -> error (cannot_unify a b :: l))
 	| _ , TType (t,tl) ->
 		rec_stack unify_stack (a,b)
 			(fun(a2,b2) -> fast_eq a a2 && fast_eq b b2)
-			(fun() -> unify a (apply_params t.t_params tl t.t_type))
+			(fun() -> try_apply_params_rec t.t_params tl t.t_type (unify a))
 			(fun l -> error (cannot_unify a b :: l))
 	| TEnum (ea,tl1) , TEnum (eb,tl2) ->
 		if ea != eb then error [cannot_unify a b];
@@ -2044,7 +2187,7 @@ let rec unify a b =
 	| TFun (l1,r1) , TFun (l2,r2) when List.length l1 = List.length l2 ->
 		let i = ref 0 in
 		(try
-			(match r2 with
+			(match follow r2 with
 			| TAbstract ({a_path=[],"Void"},_) -> incr i
 			| _ -> unify r1 r2; incr i);
 			List.iter2 (fun (_,o1,t1) (_,o2,t2) ->
@@ -2239,6 +2382,7 @@ and unify_abstracts a b a1 tl1 a2 tl2 =
 			error [cannot_unify a b]
 
 and unify_anons a b a1 a2 =
+	if would_produce_recursive_anon a1 a2 then error [cannot_unify a b];
 	(try
 		PMap.iter (fun n f2 ->
 		try
@@ -2250,7 +2394,11 @@ and unify_anons a b a1 a2 =
 				| _ -> error [invalid_kind n f1.cf_kind f2.cf_kind]);
 			if (has_class_field_flag f2 CfPublic) && not (has_class_field_flag f1 CfPublic) then error [invalid_visibility n];
 			try
-				unify_with_access f1 (field_type f1) f2;
+				let f1_type =
+					if fast_eq f1.cf_type f2.cf_type then f1.cf_type
+					else field_type f1
+				in
+				unify_with_access f1 f1_type f2;
 				(match !(a1.a_status) with
 				| Statics c when not (Meta.has Meta.MaybeUsed f1.cf_meta) -> f1.cf_meta <- (Meta.MaybeUsed,[],f1.cf_pos) :: f1.cf_meta
 				| _ -> ());
@@ -2287,7 +2435,7 @@ and unify_from ab tl a b ?(allow_transitive_cast=true) t =
 		(fun (a2,b2) -> fast_eq a a2 && fast_eq b b2)
 		(fun() ->
 			let t = apply_params ab.a_params tl t in
-			let unify_func = if allow_transitive_cast then unify else type_eq EqStrict in
+			let unify_func = if allow_transitive_cast then unify else type_eq EqRightDynamic in
 			unify_func a t)
 
 and unify_to ab tl b ?(allow_transitive_cast=true) t =
@@ -2776,7 +2924,7 @@ module TExprToExpr = struct
 		| TUnop (op,p,e) -> EUnop (op,p,convert_expr e)
 		| TFunction f ->
 			let arg (v,c) = (v.v_name,v.v_pos), false, v.v_meta, mk_type_hint v.v_type null_pos, (match c with None -> None | Some c -> Some (convert_expr c)) in
-			EFunction (None,{ f_params = []; f_args = List.map arg f.tf_args; f_type = mk_type_hint f.tf_type null_pos; f_expr = Some (convert_expr f.tf_expr) })
+			EFunction (FKAnonymous,{ f_params = []; f_args = List.map arg f.tf_args; f_type = mk_type_hint f.tf_type null_pos; f_expr = Some (convert_expr f.tf_expr) })
 		| TVar (v,eo) ->
 			EVars ([(v.v_name,v.v_pos), v.v_final, mk_type_hint v.v_type v.v_pos, eopt eo])
 		| TBlock el -> EBlock (List.map convert_expr el)
@@ -2823,6 +2971,10 @@ module TExprToExpr = struct
 end
 
 module ExtType = struct
+	let is_mono = function
+		| TMono { contents = None } -> true
+		| _ -> false
+
 	let is_void = function
 		| TAbstract({a_path=[],"Void"},_) -> true
 		| _ -> false
@@ -2838,7 +2990,7 @@ module ExtType = struct
 	let is_numeric t = match t with
 		| TAbstract({a_path=[],"Float"},_) -> true
 		| TAbstract({a_path=[],"Int"},_) -> true
-		| _ -> true
+		| _ -> false
 
 	let is_string t = match t with
 		| TInst({cl_path=[],"String"},_) -> true
@@ -2881,63 +3033,6 @@ module ExtType = struct
 	let has_variable_semantics t = has_semantics t VariableSemantics
 	let has_reference_semantics t = has_semantics t ReferenceSemantics
 	let has_value_semantics t = has_semantics t ValueSemantics
-end
-
-module StringError = struct
-	(* Source: http://en.wikibooks.org/wiki/Algorithm_implementation/Strings/Levenshtein_distance#OCaml *)
-	let levenshtein a b =
-		let x = Array.init (String.length a) (fun i -> a.[i]) in
-		let y = Array.init (String.length b) (fun i -> b.[i]) in
-		let minimum (x:int) y z =
-			let m' (a:int) b = if a < b then a else b in
-			m' (m' x y) z
-		in
-		let init_matrix n m =
-			let init_col = Array.init m in
-				Array.init n (function
-				| 0 -> init_col (function j -> j)
-				| i -> init_col (function 0 -> i | _ -> 0)
-			)
-		in
-		match Array.length x, Array.length y with
-			| 0, n -> n
-			| m, 0 -> m
-			| m, n ->
-				let matrix = init_matrix (m + 1) (n + 1) in
-				for i = 1 to m do
-					let s = matrix.(i) and t = matrix.(i - 1) in
-					for j = 1 to n do
-						let cost = abs (compare x.(i - 1) y.(j - 1)) in
-						s.(j) <- minimum (t.(j) + 1) (s.(j - 1) + 1) (t.(j - 1) + cost)
-					done
-				done;
-				matrix.(m).(n)
-
-	let filter_similar f cl =
-		let rec loop sl = match sl with
-			| (x,i) :: sl when f x i -> x :: loop sl
-			| _ -> []
-		in
-		loop cl
-
-	let get_similar s sl =
-		if sl = [] then [] else
-		let cl = List.map (fun s2 -> s2,levenshtein s s2) sl in
-		let cl = List.sort (fun (_,c1) (_,c2) -> compare c1 c2) cl in
-		let cl = filter_similar (fun s2 i -> i <= (min (String.length s) (String.length s2)) / 3) cl in
-		cl
-
-	let string_error_raise s sl msg =
-		if sl = [] then msg else
-		let cl = get_similar s sl in
-		match cl with
-			| [] -> raise Not_found
-			| [s] -> Printf.sprintf "%s (Suggestion: %s)" msg s
-			| sl -> Printf.sprintf "%s (Suggestions: %s)" msg (String.concat ", " sl)
-
-	let string_error s sl msg =
-		try string_error_raise s sl msg
-		with Not_found -> msg
 end
 
 let class_module_type c = {

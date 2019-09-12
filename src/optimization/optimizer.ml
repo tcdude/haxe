@@ -237,7 +237,7 @@ let reduce_control_flow ctx e = match e.eexpr with
 		| DoWhile -> e) (* we cant remove while since sub can contain continue/break *)
 	| TSwitch (e1,cases,def) ->
 		let e = match Texpr.skip e1 with
-			| {eexpr = TConst ct} as e1 ->
+			| {eexpr = TConst ct} as e1 when (match ct with TSuper | TThis -> false | _ -> true) ->
 				let rec loop cases = match cases with
 					| (el,e) :: cases ->
 						if List.exists (Texpr.equal e1) el then e
@@ -316,6 +316,7 @@ let rec make_constant_expression ctx ?(concat_strings=false) e =
 	let e = reduce_loop ctx e in
 	match e.eexpr with
 	| TConst _ -> Some e
+	| TField({eexpr = TTypeExpr _},FEnum _) -> Some e
 	| TBinop ((OpAdd|OpSub|OpMult|OpDiv|OpMod|OpShl|OpShr|OpUShr|OpOr|OpAnd|OpXor) as op,e1,e2) -> (match make_constant_expression ctx e1,make_constant_expression ctx e2 with
 		| Some ({eexpr = TConst (TString s1)}), Some ({eexpr = TConst (TString s2)}) when concat_strings ->
 			Some (mk (TConst (TString (s1 ^ s2))) ctx.com.basic.tstring (punion e1.epos e2.epos))
@@ -662,11 +663,11 @@ let optimize_completion_expr e args =
 			old();
 			typing_side_effect := !told;
 			(EBlock (List.rev el),p)
-		| EFunction (v,f) ->
-			(match v with
-			| None -> ()
-			| Some (name,_) ->
-				decl name None (Some e));
+		| EFunction (kind,f) ->
+			(match kind with
+			| FKNamed ((name,_),_) ->
+				decl name None (Some e)
+			| _ -> ());
 			let old = save() in
 			List.iter (fun ((n,_),_,_,t,e) -> decl n (Option.map fst t) e) f.f_args;
 			let e = map e in

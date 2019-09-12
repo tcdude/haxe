@@ -217,6 +217,10 @@ let transform_abstract_field com this_t a_t a f =
 			if fu.f_expr <> None then error "MultiType constructors cannot have a body" f.cff_pos;
 			f.cff_access <- (AExtern,null_pos) :: f.cff_access;
 		end;
+		(try
+			let _, p = List.find (fun (acc, _) -> acc = AMacro) f.cff_access in
+			error "Macro abstract constructors are not supported" p
+		with Not_found -> ());
 		(* We don't want the generated expression positions to shadow the real code. *)
 		let p = { p with pmax = p.pmin } in
 		let fu = {
@@ -345,7 +349,7 @@ let build_enum_abstract ctx c a fields p =
 				| None ->
 					if not c.cl_extern then begin match mode with
 						| EAString ->
-							set_field (EConst (String (fst field.cff_name)),null_pos)
+							set_field (EConst (String (fst field.cff_name,SDoubleQuotes)),null_pos)
 						| EAInt i ->
 							set_field (EConst (Int (string_of_int !i)),null_pos);
 							incr i;
@@ -641,7 +645,7 @@ let bind_type (ctx,cctx,fctx) cf r p =
 	in
 	if ctx.com.display.dms_full_typing then begin
 		if fctx.is_macro && not ctx.in_macro then
-			()
+			force_macro ()
 		else begin
 			cf.cf_type <- TLazy r;
 			(* is_lib ? *)
@@ -793,10 +797,8 @@ let bind_var (ctx,cctx,fctx) cf e =
 					begin match c.cl_kind with
 						| KAbstractImpl a when Meta.has Meta.Enum cf.cf_meta && Meta.has Meta.Enum a.a_meta ->
 							unify ctx t (TAbstract(a,(List.map (fun _ -> mk_mono()) a.a_params))) p;
-							begin match e.eexpr with
-								| TCast(e1,None) -> unify ctx e1.etype a.a_this e1.epos
-								| _ -> assert false
-							end
+							let e1 = match e.eexpr with TCast(e1,None) -> e1 | _ -> e in
+							unify ctx e1.etype a.a_this e1.epos
 						| _ ->
 							()
 					end;
@@ -856,7 +858,8 @@ let check_abstract (ctx,cctx,fctx) c cf fd t ret p =
 			let ta = TAbstract(a, List.map (fun _ -> mk_mono()) a.a_params) in
 			let tthis = if fctx.is_abstract_member || Meta.has Meta.To cf.cf_meta then monomorphs a.a_params a.a_this else a.a_this in
 			let allows_no_expr = ref (Meta.has Meta.CoreType a.a_meta) in
-			let rec loop ml = match ml with
+			let rec loop ml =
+				(match ml with
 				| (Meta.From,_,_) :: _ ->
 					let r = exc_protect ctx (fun r ->
 						r := lazy_processing (fun () -> t);
@@ -935,7 +938,6 @@ let check_abstract (ctx,cctx,fctx) c cf fd t ret p =
 						| _ ->
 							display_error ctx ("First argument of implementation function must be " ^ (s_type (print_context()) tthis)) cf.cf_pos
 					end;
-					loop ml
 				| ((Meta.Resolve,_,_) | (Meta.Op,[EField _,_],_)) :: _ ->
 					let targ = if fctx.is_abstract_member then tthis else ta in
 					let check_fun t1 t2 =
@@ -956,10 +958,10 @@ let check_abstract (ctx,cctx,fctx) c cf fd t ret p =
 						| _ ->
 							error ("Field type of resolve must be " ^ (s_type (print_context()) targ) ^ " -> String -> T") cf.cf_pos
 					end;
-				| _ :: ml ->
-					loop ml
-				| [] ->
-					()
+				| _ -> ());
+				match ml with
+				| _ :: ml -> loop ml
+				| [] -> ()
 			in
 			loop cf.cf_meta;
 			let check_bind () =
@@ -1114,7 +1116,7 @@ let create_method (ctx,cctx,fctx) c f fd p =
 					cf.cf_expr <- None;
 					cf.cf_type <- t
 				| _ ->
-					if cf.cf_name = Parser.magic_display_field_name then DisplayEmitter.check_field_modifiers ctx c cf fctx.override fctx.display_modifier;
+					if Meta.has Meta.DisplayOverride cf.cf_meta then DisplayEmitter.check_field_modifiers ctx c cf fctx.override fctx.display_modifier;
 					let e , fargs = TypeloadFunction.type_function ctx args ret fmode fd fctx.is_display_field p in
 					begin match fctx.field_kind with
 					| FKNormal when not fctx.is_static -> TypeloadCheck.check_overriding ctx c cf
@@ -1252,7 +1254,7 @@ let create_property (ctx,cctx,fctx) c f (get,set,t,eo) p =
 		with Not_found ->
 			()
 	in
-	let delay_check = if c.cl_interface then delay_late ctx PBuildClass else delay ctx PTypeField in
+	let delay_check = delay ctx PConnectField in
 	let get = (match get with
 		| "null",_ -> AccNo
 		| "dynamic",_ -> AccCall
@@ -1260,7 +1262,7 @@ let create_property (ctx,cctx,fctx) c f (get,set,t,eo) p =
 		| "default",_ -> AccNormal
 		| "get",pget ->
 			let get = "get_" ^ name in
-			if fctx.is_display_field && DisplayPosition.display_position#enclosed_in pget then delay ctx PTypeField (fun () -> display_accessor get pget);
+			if fctx.is_display_field && DisplayPosition.display_position#enclosed_in pget then delay ctx PConnectField (fun () -> display_accessor get pget);
 			if not cctx.is_lib then delay_check (fun() -> check_method get t_get);
 			AccCall
 		| _,pget ->
@@ -1279,7 +1281,7 @@ let create_property (ctx,cctx,fctx) c f (get,set,t,eo) p =
 		| "default",_ -> AccNormal
 		| "set",pset ->
 			let set = "set_" ^ name in
-			if fctx.is_display_field && DisplayPosition.display_position#enclosed_in pset then delay ctx PTypeField (fun () -> display_accessor set pset);
+			if fctx.is_display_field && DisplayPosition.display_position#enclosed_in pset then delay ctx PConnectField (fun () -> display_accessor set pset);
 			if not cctx.is_lib then delay_check (fun() -> check_method set t_set);
 			AccCall
 		| _,pset ->
@@ -1318,7 +1320,7 @@ let init_field (ctx,cctx,fctx) f =
 	let name = fst f.cff_name in
 	TypeloadCheck.check_global_metadata ctx f.cff_meta (fun m -> f.cff_meta <- m :: f.cff_meta) c.cl_module.m_path c.cl_path (Some name);
 	let p = f.cff_pos in
-	if starts_with name '$' then display_error ctx "Field names starting with a dollar are not allowed" p;
+	if not c.cl_extern && not (Meta.has Meta.Native f.cff_meta) then Typecore.check_field_name ctx name p;
 	List.iter (fun acc ->
 		match (fst acc, f.cff_kind) with
 		| APublic, _ | APrivate, _ | AStatic, _ | AFinal, _ | AExtern, _ -> ()
@@ -1343,16 +1345,38 @@ let init_field (ctx,cctx,fctx) f =
 	| FProp (get,set,t,eo) ->
 		create_property (ctx,cctx,fctx) c f (get,set,t,eo) p
 
+let check_overload ctx f fs =
+	try
+		let f2 =
+			List.find (fun f2 ->
+				f != f2 &&
+				Overloads.compare_overload_args ~ctx f.cf_type f2.cf_type f f2 = Overloads.Same
+			) fs
+		in
+		display_error ctx ("Another overloaded field of same signature was already declared : " ^ f.cf_name) f.cf_pos;
+		display_error ctx ("The second field is declared here") f2.cf_pos
+	with Not_found ->
+		try
+			let f2 =
+				List.find (fun f2 ->
+					f != f2 &&
+					Overloads.compare_overload_args ~ctx f.cf_type f2.cf_type f f2 = Overloads.Impl_conflict
+				) fs
+			in
+			display_error ctx (
+				"Another overloaded field of similar signature was already declared : " ^
+				f.cf_name ^
+				"\nThe signatures are different in Haxe, but not in the target language"
+			) f.cf_pos;
+			display_error ctx ("The second field is declared here") f2.cf_pos
+		with | Not_found -> ()
+
 let check_overloads ctx c =
 	(* check if field with same signature was declared more than once *)
 	List.iter (fun f ->
 		if Meta.has Meta.Overload f.cf_meta then
-			List.iter (fun f2 ->
-				try
-					ignore (List.find (fun f3 -> f3 != f2 && Overloads.same_overload_args f2.cf_type f3.cf_type f2 f3) (f :: f.cf_overloads));
-					display_error ctx ("Another overloaded field of same signature was already declared : " ^ f2.cf_name) f2.cf_pos
-				with | Not_found -> ()
-		) (f :: f.cf_overloads)) (c.cl_ordered_fields @ c.cl_ordered_statics)
+			check_overload ctx f (f :: f.cf_overloads)
+	) (c.cl_ordered_fields @ c.cl_ordered_statics)
 
 let init_class ctx c p context_init herits fields =
 	let ctx,cctx = create_class_context ctx c context_init p in
@@ -1380,7 +1404,7 @@ let init_class ctx c p context_init herits fields =
 						| _ -> ""
 					in
 					if not (ParserEntry.is_true (ParserEntry.eval ctx.com.defines e)) then
-						Some (sc,(match List.rev l with (EConst (String msg),_) :: _ -> Some msg | _ -> None))
+						Some (sc,(match List.rev l with (EConst (String(msg,_)),_) :: _ -> Some msg | _ -> None))
 					else
 						loop l
 			in
@@ -1390,7 +1414,7 @@ let init_class ctx c p context_init herits fields =
 	in
 	let rec check_if_feature = function
 		| [] -> []
-		| (Meta.IfFeature,el,_) :: _ -> List.map (fun (e,p) -> match e with EConst (String s) -> s | _ -> error "String expected" p) el
+		| (Meta.IfFeature,el,_) :: _ -> List.map (fun (e,p) -> match e with EConst (String(s,_)) -> s | _ -> error "String expected" p) el
 		| _ :: l -> check_if_feature l
 	in
 	let cl_if_feature = check_if_feature c.cl_meta in
@@ -1446,7 +1470,11 @@ let init_class ctx c p context_init herits fields =
 						(if not (Meta.has Meta.Overload mainf.cf_meta) then display_error ctx ("Overloaded methods must have @:overload metadata") mainf.cf_pos);
 						mainf.cf_overloads <- cf :: mainf.cf_overloads
 					else
-						display_error ctx ("Duplicate class field declaration : " ^ s_type_path c.cl_path ^ "." ^ cf.cf_name) p
+						let type_kind,path = match c.cl_kind with
+							| KAbstractImpl a -> "abstract",a.a_path
+							| _ -> "class",c.cl_path
+						in
+						display_error ctx ("Duplicate " ^ type_kind ^ " field declaration : " ^ s_type_path path ^ "." ^ cf.cf_name) p
 				else
 				if fctx.do_add then add_field c cf (fctx.is_static || fctx.is_macro && ctx.in_macro)
 			end
@@ -1495,7 +1523,7 @@ let init_class ctx c p context_init herits fields =
 	begin match cctx.uninitialized_final with
 		| Some pf when c.cl_constructor = None ->
 			display_error ctx "This class has uninitialized final vars, which requires a constructor" p;
-			error "Example of an uninitialized final var" pf
+			display_error ctx "Example of an uninitialized final var" pf;
 		| _ ->
 			()
 	end;
@@ -1505,13 +1533,10 @@ let init_class ctx c p context_init herits fields =
 	(* check overloaded constructors *)
 	(if ctx.com.config.pf_overload && not cctx.is_lib then match c.cl_constructor with
 	| Some ctor ->
-		delay ctx PTypeField (fun() ->
+		delay ctx PTypeField (fun () ->
+			(* TODO: consider making a broader check, and treat some types, like TAnon and type parameters as Dynamic *)
 			List.iter (fun f ->
-				try
-					(* TODO: consider making a broader check, and treat some types, like TAnon and type parameters as Dynamic *)
-					ignore(List.find (fun f2 -> f != f2 && Overloads.same_overload_args f.cf_type f2.cf_type f f2) (ctor :: ctor.cf_overloads));
-					display_error ctx ("Another overloaded field of same signature was already declared : " ^ f.cf_name) f.cf_pos;
-				with Not_found -> ()
+				check_overload ctx f (ctor :: ctor.cf_overloads)
 			) (ctor :: ctor.cf_overloads)
 		)
 	| _ -> ());

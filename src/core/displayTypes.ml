@@ -39,13 +39,15 @@ module SymbolInformation = struct
 		kind : SymbolKind.t;
 		pos : Globals.pos;
 		container_name : string option;
+		deprecated : bool;
 	}
 
-	let make name kind pos container_name = {
+	let make name kind pos container_name deprecated = {
 		name = name;
 		kind = kind;
 		pos = pos;
 		container_name = container_name;
+		deprecated = deprecated;
 	}
 end
 
@@ -70,6 +72,8 @@ module DiagnosticsKind = struct
 		| DKCompilerError
 		| DKRemovableCode
 		| DKParserError
+		| DKDeprecationWarning
+		| DKInactiveBlock
 
 	let to_int = function
 		| DKUnusedImport -> 0
@@ -77,6 +81,8 @@ module DiagnosticsKind = struct
 		| DKCompilerError -> 2
 		| DKRemovableCode -> 3
 		| DKParserError -> 4
+		| DKDeprecationWarning -> 5
+		| DKInactiveBlock -> 6
 end
 
 module CompletionResultKind = struct
@@ -123,7 +129,7 @@ module CompletionResultKind = struct
 							None
 				in
 				let fields =
-					("item",CompletionItem.to_json ctx item) ::
+					("item",CompletionItem.to_json ctx None item) ::
 					("range",generate_pos_as_range p) ::
 					("iterator", match iterator with
 						| None -> jnull
@@ -291,3 +297,15 @@ type reference_kind =
 	| KEnumField
 	| KModuleType
 	| KConstructor
+
+type completion_subject = {
+	s_name : string option;
+	s_start_pos : pos;
+	s_insert_pos : pos;
+}
+
+let make_subject name ?(start_pos=None) insert_pos = {
+	s_name = name;
+	s_start_pos = (match start_pos with None -> insert_pos | Some p -> p);
+	s_insert_pos = insert_pos;
+}
