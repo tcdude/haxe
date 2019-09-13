@@ -49,10 +49,10 @@ type ctx = {
 	js_modern : bool;
 	js_flatten : bool;
 	has_resolveClass : bool;
-	has_instanceof : bool;
+	has_interface_check : bool;
 	es_version : int;
 	mutable current : tclass;
-	mutable statics : (tclass * string * texpr) list;
+	mutable statics : (tclass * tclass_field * texpr) list;
 	mutable inits : texpr list;
 	mutable tabs : string;
 	mutable in_value : tvar option;
@@ -72,7 +72,7 @@ let get_exposed ctx path meta =
 	try
 		let (_, args, pos) = Meta.get Meta.Expose meta in
 		(match args with
-			| [ EConst (String s), _ ] -> [s]
+			| [ EConst (String(s,_)), _ ] -> [s]
 			| [] -> [path]
 			| _ -> abort "Invalid @:expose parameters" pos)
 	with Not_found -> []
@@ -1042,7 +1042,7 @@ let gen_class_static_field ctx c f =
 			gen_value ctx e;
 			newline ctx;
 		| _ ->
-			ctx.statics <- (c,f.cf_name,e) :: ctx.statics
+			ctx.statics <- (c,f,e) :: ctx.statics
 
 let can_gen_class_field ctx = function
 	| { cf_expr = (None | Some { eexpr = TConst TNull }) } when not (has_feature ctx "Type.getInstanceFields") ->
@@ -1113,7 +1113,7 @@ let generate_class_es3 ctx c =
 	generate_class___name__ ctx c;
 	generate_class___isInterface__ ctx c;
 
-	if ctx.has_instanceof then
+	if ctx.has_interface_check then
 		(match c.cl_implements with
 		| [] -> ()
 		| l ->
@@ -1268,7 +1268,7 @@ let generate_class_es6 ctx c =
 	generate_class___name__ ctx c;
 	generate_class___isInterface__ ctx c;
 
-	if ctx.has_instanceof then
+	if ctx.has_interface_check then
 		(match c.cl_implements with
 		| [] -> ()
 		| l ->
@@ -1294,7 +1294,7 @@ let generate_class_es6 ctx c =
 
 	(match c.cl_super with
 	| Some (csup,_) ->
-		if ctx.has_instanceof || has_feature ctx "Type.getSuperClass" then begin
+		if ctx.has_interface_check || has_feature ctx "Type.getSuperClass" then begin
 			let psup = ctx.type_accessor (TClassDecl csup) in
 			print ctx "%s.__super__ = %s" p psup;
 			newline ctx
@@ -1446,7 +1446,9 @@ let generate_enum ctx e =
 	flush ctx
 
 let generate_static ctx (c,f,e) =
-	print ctx "%s%s = " (s_path ctx c.cl_path) (static_field ctx c f);
+	let dot_path = (dot_path c.cl_path) ^ (static_field ctx c f.cf_name) in
+	(match (get_exposed ctx dot_path f.cf_meta) with [s] -> print ctx "$hx_exports%s = " (path_to_brackets s) | _ -> ());
+	print ctx "%s%s = " (s_path ctx c.cl_path) (static_field ctx c f.cf_name);
 	gen_value ctx e;
 	newline ctx
 
@@ -1460,9 +1462,9 @@ let generate_require ctx path meta =
 		generate_package_create ctx path;
 
 	(match args with
-	| [(EConst(String(module_name)),_)] ->
+	| [(EConst(String(module_name,_)),_)] ->
 		print ctx "%s = require(\"%s\")" p module_name
-	| [(EConst(String(module_name)),_) ; (EConst(String(object_path)),_)] ->
+	| [(EConst(String(module_name,_)),_) ; (EConst(String(object_path,_)),_)] ->
 		print ctx "%s = require(\"%s\").%s" p module_name object_path
 	| _ ->
 		abort "Unsupported @:jsRequire format" mp);
@@ -1471,7 +1473,7 @@ let generate_require ctx path meta =
 
 let need_to_generate_interface ctx cl_iface =
 	ctx.has_resolveClass (* generate so we can resolve it for whatever reason *)
-	|| ctx.has_instanceof (* generate because we need __interfaces__ for run-time type checks *)
+	|| ctx.has_interface_check (* generate because we need __interfaces__ for run-time type checks *)
 	|| is_directly_used ctx.com cl_iface.cl_meta (* generate because it's just directly accessed in code *)
 
 let generate_type ctx = function
@@ -1529,7 +1531,7 @@ let alloc_ctx com es_version =
 		js_modern = not (Common.defined com Define.JsClassic);
 		js_flatten = not (Common.defined com Define.JsUnflatten);
 		has_resolveClass = Common.has_feature com "Type.resolveClass";
-		has_instanceof = Common.has_feature com "js.Boot.__instanceof";
+		has_interface_check = Common.has_feature com "js.Boot.__interfLoop";
 		es_version = es_version;
 		statics = [];
 		inits = [];

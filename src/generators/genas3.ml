@@ -264,6 +264,7 @@ let rec type_str ctx t p =
 		| [], "Int" -> "int"
 		| [], "Float" -> "Number"
 		| [], "Bool" -> "Boolean"
+		| ["flash"], "AnyType" -> "*"
 		| _ -> s_path ctx true a.a_path p)
 	| TEnum (e,_) ->
 		if e.e_extern then "Object" else s_path ctx true e.e_path p
@@ -482,6 +483,9 @@ and gen_call ctx e el r =
 		spr ctx ")";
 	| TIdent "__unprotect__", [e] ->
 		gen_value ctx e
+	| TIdent "__vector__", [] ->
+		let t = match r with TAbstract ({a_path = [],"Class"}, [vt]) -> vt | _ -> assert false in
+		spr ctx (type_str ctx t e.epos);
 	| TIdent "__vector__", [e] ->
 		spr ctx (type_str ctx r e.epos);
 		spr ctx "(";
@@ -1008,8 +1012,8 @@ let generate_field ctx static f =
 		| Meta.Meta, [Ast.ECall ((Ast.EConst (Ast.Ident n),_),args),_] ->
 			let mk_arg (a,p) =
 				match a with
-				| Ast.EConst (Ast.String s) -> (None, s)
-				| Ast.EBinop (Ast.OpAssign,(Ast.EConst (Ast.Ident n),_),(Ast.EConst (Ast.String s),_)) -> (Some n, s)
+				| Ast.EConst (Ast.String(s,_)) -> (None, s)
+				| Ast.EBinop (Ast.OpAssign,(Ast.EConst (Ast.Ident n),_),(Ast.EConst (Ast.String(s,_)),_)) -> (Some n, s)
 				| _ -> abort "Invalid meta definition" p
 			in
 			print ctx "[%s" n;
@@ -1060,8 +1064,8 @@ let generate_field ctx static f =
 			| TFun (args,r) when (match f.cf_kind with Method MethDynamic | Var _ -> false | _ -> true) ->
 				let rec loop = function
 					| [] -> f.cf_name
-					| (Meta.Getter,[Ast.EConst (Ast.String name),_],_) :: _ -> "get " ^ name
-					| (Meta.Setter,[Ast.EConst (Ast.String name),_],_) :: _ -> "set " ^ name
+					| (Meta.Getter,[Ast.EConst (Ast.String(name,_)),_],_) :: _ -> "get " ^ name
+					| (Meta.Setter,[Ast.EConst (Ast.String(name,_)),_],_) :: _ -> "set " ^ name
 					| _ :: l -> loop l
 				in
 				print ctx "function %s(" (loop f.cf_meta);

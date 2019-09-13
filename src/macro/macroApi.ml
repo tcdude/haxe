@@ -50,7 +50,6 @@ type 'value compiler_api = {
 	encode_ctype : Ast.type_hint -> 'value;
 	decode_type : 'value -> t;
 	flush_context : (unit -> t) -> t;
-	typer_ctx : Typecore.typer;
 }
 
 
@@ -76,6 +75,9 @@ type enum_type =
 	| IQuoteStatus
 	| IImportMode
 	| IDisplayKind
+	| IMessage
+	| IFunctionKind
+	| IStringLiteralKind
 
 (**
 	Our access to the interpreter from the macro api
@@ -170,6 +172,9 @@ let enum_name = function
 	| IImportMode -> "ImportMode"
 	| IQuoteStatus -> "QuoteStatus"
 	| IDisplayKind -> "DisplayKind"
+	| IMessage -> "Message"
+	| IFunctionKind -> "FunctionKind"
+	| IStringLiteralKind -> "StringLiteralKind"
 
 let all_enums =
 	let last = IImportMode in
@@ -212,11 +217,18 @@ let null f = function
 
 let encode_enum ?(pos=None) k tag vl = encode_enum k pos tag vl
 
+let encode_string_literal_kind qs =
+	let tag = match qs with
+		| SDoubleQuotes -> 0
+		| SSingleQuotes -> 1
+	in
+	encode_enum IStringLiteralKind tag []
+
 let encode_const c =
 	let tag, pl = match c with
 	| Int s -> 0, [encode_string s]
 	| Float s -> 1, [encode_string s]
-	| String s -> 2, [encode_string s]
+	| String(s,qs) -> 2, [encode_string s;encode_string_literal_kind qs]
 	| Ident s -> 3, [encode_string s]
 	| Regexp (s,opt) -> 4, [encode_string s;encode_string opt]
 	in
@@ -390,6 +402,14 @@ and encode_display_kind dk =
 	in
 	encode_enum ~pos:None IDisplayKind tag pl
 
+and encode_message msg =
+	let tag, pl = match msg with
+		| CMInfo(msg,p) -> 0, [(encode_string msg); (encode_pos p)]
+		| CMWarning(msg,p) -> 1, [(encode_string msg); (encode_pos p)]
+		| CMError(_,_) -> assert false
+	in
+	encode_enum ~pos:None IMessage tag pl
+
 and encode_expr e =
 	let rec loop (e,p) =
 		let tag, pl = match e with
@@ -428,8 +448,8 @@ and encode_expr e =
 						"expr",null loop eo;
 					]
 				) vl)]
-			| EFunction (name,f) ->
-				11, [null encode_placed_name name; encode_fun f]
+			| EFunction (kind,f) ->
+				11, [encode_function_kind kind; encode_fun f]
 			| EBlock el ->
 				12, [encode_array (List.map loop el)]
 			| EFor (e,eloop) ->
@@ -494,6 +514,15 @@ and encode_null_expr e =
 	| Some e ->
 		encode_expr e
 
+and encode_function_kind kind =
+	match kind with
+	| FKAnonymous ->
+		encode_enum IFunctionKind 0 []
+	| FKNamed (name,inline) ->
+		encode_enum IFunctionKind 1 [encode_placed_name name; vbool inline]
+	| FKArrow ->
+		encode_enum IFunctionKind 2 []
+
 (* ---------------------------------------------------------------------- *)
 (* EXPR DECODING *)
 
@@ -506,11 +535,17 @@ let opt_list f v =
 let decode_opt_bool v =
 	if v = vnull then false else decode_bool v
 
+let decode_string_literal_kind v =
+	if v = vnull then SDoubleQuotes else match decode_enum v with
+	| 0,[] -> SDoubleQuotes
+	| 1,[] -> SSingleQuotes
+	| _ -> raise Invalid_expr
+
 let decode_const c =
 	match decode_enum c with
 	| 0, [s] -> Int (decode_string s)
 	| 1, [s] -> Float (decode_string s)
-	| 2, [s] -> String (decode_string s)
+	| 2, [s;qs] -> String (decode_string s,decode_string_literal_kind qs)
 	| 3, [s] -> Ident (decode_string s)
 	| 4, [s;opt] -> Regexp (decode_string s, decode_string opt)
 	| 5, [s] -> Ident (decode_string s) (** deprecated CType, keep until 3.0 release **)
@@ -689,6 +724,12 @@ and decode_display_kind v = match (decode_enum v) with
 	| 4, [outermost] -> DKPattern (decode_bool outermost)
 	| _ -> raise Invalid_expr
 
+and decode_function_kind kind = if kind = vnull then FKAnonymous else match decode_enum kind with
+	| 0, [] -> FKAnonymous
+	| 1, [name;inline] -> FKNamed ((decode_string name,Globals.null_pos), decode_opt_bool inline)
+	| 2, [] -> FKArrow
+	| _ -> raise Invalid_expr
+
 and decode_expr v =
 	let rec loop v =
 		let p = decode_pos (field v "pos") in
@@ -731,8 +772,8 @@ and decode_expr v =
 				let final = if vfinal == vnull then false else decode_bool vfinal in
 				((decode_placed_name (field v "name_pos") (field v "name")),final,opt decode_ctype (field v "type"),opt loop (field v "expr"))
 			) (decode_array vl))
-		| 11, [fname;f] ->
-			EFunction (opt (fun v -> decode_string v,Globals.null_pos) fname,decode_fun f)
+		| 11, [kind;f] ->
+			EFunction (decode_function_kind kind,decode_fun f)
 		| 12, [el] ->
 			EBlock (List.map loop (decode_array el))
 		| 13, [e1;e2] ->
@@ -1436,7 +1477,7 @@ let decode_type_def v =
 	) in
 	(* if our package ends with an uppercase letter, then it's the module name *)
 	let pack,name = (match List.rev pack with
-		| last :: l when not (is_lower_ident last) -> List.rev l, last
+		| last :: l when String.length last > 0 && StringHelper.starts_uppercase_identifier last -> List.rev l, last
 		| _ -> pack, fst name
 	) in
 	(pack, name), tdef, pos
@@ -1496,6 +1537,22 @@ let macro_api ccom get_api =
 			(ccom()).warning msg p;
 			vnull
 		);
+		"info", vfun2 (fun msg p ->
+			let msg = decode_string msg in
+			let p = decode_pos p in
+			(ccom()).info msg p;
+			vnull
+		);
+		"get_messages", vfun0 (fun() ->
+			encode_array (List.map (fun msg -> encode_message msg) ((ccom()).get_messages()));
+		);
+		"filter_messages", vfun1 (fun predicate ->
+			let predicate = prepare_callback predicate 2 in
+			(ccom()).filter_messages (fun msg -> (
+				decode_bool (predicate [encode_message msg])
+			));
+			vnull
+		);
 		"class_path", vfun0 (fun() ->
 			encode_array (List.map encode_string (ccom()).class_path);
 		);
@@ -1504,8 +1561,14 @@ let macro_api ccom get_api =
 			encode_string (try Common.find_file (ccom()) file with Not_found -> failwith ("File not found '" ^ file ^ "'"))
 		);
 		"define", vfun2 (fun s v ->
+			let s = decode_string s in
+			let com = ccom() in
+			if com.stage <> CInitMacrosStart then begin
+				let v = if v = vnull then "" else ", " ^ (decode_string v) in
+				com.warning ("Should be used in initialization macros only: haxe.macro.Compiler.define(" ^ s ^ v ^ ")") Globals.null_pos;
+			end;
 			let v = if v = vnull then "" else "=" ^ (decode_string v) in
-			Common.raw_define (ccom()) ((decode_string s) ^ v);
+			Common.raw_define com (s ^ v);
 			vnull
 		);
 		"defined", vfun1 (fun s ->
@@ -1656,6 +1719,12 @@ let macro_api ccom get_api =
 			);
 			vnull
 		);
+		"flush_disk_cache", vfun0 (fun () ->
+			let com = (get_api()).get_com() in
+			Hashtbl.clear com.file_lookup_cache;
+			Hashtbl.clear com.readdir_cache;
+			vnull
+		);
 		"get_pos_infos", vfun1 (fun p ->
 			let p = decode_pos p in
 			encode_obj ["min",vint p.Globals.pmin;"max",vint p.Globals.pmax;"file",encode_string p.Globals.pfile]
@@ -1759,6 +1828,8 @@ let macro_api ccom get_api =
 		"add_class_path", vfun1 (fun cp ->
 			let com = ccom() in
 			let cp = decode_string cp in
+			if com.stage <> CInitMacrosStart then
+				com.warning ("Should be used in initialization macros only: haxe.macro.Compiler.addClassPath(" ^ cp ^ ")") Globals.null_pos;
 			let cp = Path.add_trailing_slash cp in
 			com.class_path <- cp :: com.class_path;
 			(match com.get_macros() with
@@ -1767,24 +1838,15 @@ let macro_api ccom get_api =
 			| None ->
 				());
 			Hashtbl.clear com.file_lookup_cache;
+			Hashtbl.clear com.readdir_cache;
 			vnull
 		);
 		"add_native_lib", vfun1 (fun file ->
 			let file = decode_string file in
 			let com = ccom() in
-			(match com.platform with
-			| Globals.Flash -> SwfLoader.add_swf_lib com file false
-			| Globals.Java -> Java.add_java_lib com file false
-			| Globals.Cs ->
-				let file, is_std = match ExtString.String.nsplit file "@" with
-					| [file] ->
-						file,false
-					| [file;"std"] ->
-						file,true
-					| _ -> failwith ("unsupported file@`std` format: " ^ file)
-				in
-				Dotnet.add_net_lib com file is_std
-			| _ -> failwith "Unsupported platform");
+			if com.stage <> CInitMacrosStart then
+				com.warning ("Should be used in initialization macros only: haxe.macro.Compiler.addNativeLib(" ^ file ^ ")") Globals.null_pos;
+			NativeLibraryHandler.add_native_lib com file false ();
 			vnull
 		);
 		"add_native_arg", vfun1 (fun arg ->
@@ -1866,8 +1928,8 @@ let macro_api ccom get_api =
 			List.iter (fun v ->
 				let s = decode_string v in
 				let s = Path.unique_full_path s in
-				CompilationServer.taint_modules cs s;
-				CompilationServer.remove_files cs s;
+				cs#taint_modules s;
+				cs#remove_files s;
 			) (decode_array a);
 			vnull
 		);
