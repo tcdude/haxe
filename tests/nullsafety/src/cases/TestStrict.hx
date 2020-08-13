@@ -78,6 +78,19 @@ private class TestWithoutConstructor {
 	@:shouldFail var notInitializedField:String;
 }
 
+class Issue9643 {
+	static var tmp:Null<()->Void>;
+
+	final field: String;
+
+	public function new() {
+		tmp = () -> @:nullSafety(Off) method();
+		field = 'hello';
+	}
+
+	function method() {}
+}
+
 class AllVarsInitializedInConstructor_weHaveClosure_thisShouldBeUsable {
 	var v:Int;
 
@@ -943,6 +956,31 @@ class TestStrict {
 
 	@:shouldFail @:nullSafety(InvalidArgument)
 	static function invalidMetaArgument_shouldFail() {}
+
+	static function issue9474_becomesSafeInIf() {
+		var a:Null<String> = null;
+		if(Math.random() > 0.5) a = 'hi';
+		shouldFail(var s:String = a);
+
+		var a:Null<String> = null;
+		if(Math.random() > 0.5) a = null
+		else a = 'hello';
+		shouldFail(var s:String = a);
+
+		var a:Null<String> = null;
+		if(Math.random() > 0.5) a = 'hello'
+		else a = null;
+		shouldFail(var s:String = a);
+
+		var a:Null<String> = null;
+		if(a == null) a = 'hi';
+		var s:String = a;
+
+		var a:Null<String> = null;
+		if(Math.random() > 0.5) a = 'hi'
+		else a = 'hello';
+		var s:String = a;
+	}
 }
 
 private class FinalNullableFields {

@@ -1,3 +1,45 @@
+2020-07-22 4.1.3
+
+	General improvements:
+
+	all : added an error on `return` outside of a function (#9659)
+	php : support @:native("") for extern classes (#6448)
+	python : support @:native("") for extern classes (#6448)
+
+	Bugfixes:
+
+	all : fixed compilation server bug caused by removing `inline` from a method (#9690)
+	macro : fixed compiler crash if `@:genericBuild` meta is removed by a macro during building (#9391)
+	jvm : fixed "--java-lib-extern" (#9515)
+	flash : fixed var shadowing issue for variables captured in a closure inside of a loop (#9624)
+	flash : fixed `VerifyError` exception when `Void` end up as an argument type after inlining (#9678)
+	php : fixed runtime error "cannot use temporary expression in write context" for call arguments passed by reference
+	cs : fixed `cs.Lib.rethrow` (#9738)
+	nullsafety: fixed `@:nullSafety(Off)` in closures inside of constructors (#9643)
+	nullsafety: fixed "Type not found NullSafetyMode_Impl_" (#9483)
+
+2020-06-19 4.1.2
+
+	Bugfixes:
+
+	all : added `contains` and `keyValueIterator` methods to haxe.ds.ReadOnlyArray
+	all : fixed super constructor call when extending externs (#7837, #9501)
+	all : fixed compiler crash for "--run" argument without a value (#9513)
+	all : fixed local variable name collision in `try..catch` (#9533)
+	all : fixed memory leak in completion server related to haxe.Exception (#9537)
+	display : fixed completion for out-of-bounds argument in a call (#9435)
+	display : fixed "find references" through interfaces (#9470)
+	display : optimized "find references" (#9504)
+	display : optimized "server/invalidate" requests (#9509)
+	analyzer : fixed compiler crash upon handling code branches with enums with optional arguments (#9591)
+	jvm : added "--java-lib-extern" to use jar files as externs without adding them to the compiled project (#9515)
+	macro : fixed type intersection syntax in macro reification (#9404)
+	eval : fixed exception message when catching compiler-generated `haxe.macro.Error` as `Dynamic` (#9600)
+	lua : fixed lua code generation without `--main` compilation argument (#9489)
+	php : added an overload signature for `session_set_cookie_params` function (#9507)
+	js : fixed name collisions for catch variables to avoid closure compiler errors (#9617)
+	nullsafety : fixed various scenarios of `if..else` branching (#9474)
+
 2020-22-05 4.1.1
 
 	New features:

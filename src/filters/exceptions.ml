@@ -38,6 +38,7 @@ let haxe_exception_static_call ctx method_name args p =
 		| TFun(_,t) -> t
 		| _ -> error ("haxe.Exception." ^ method_name ^ " is not a function and cannot be called") p
 	in
+	add_dependency ctx.typer.curclass.cl_module ctx.haxe_exception_class.cl_module;
 	make_static_call ctx.typer ctx.haxe_exception_class method_field (fun t -> t) args return_type p
 
 (**
@@ -149,20 +150,23 @@ let rec contains_throw_or_try e =
 	to be thrown.
 *)
 let requires_wrapped_throw cfg e =
-	(*
-		Check if `e` is of `haxe.Exception` type directly (not a descendant),
-		but not a `new haxe.Exception(...)` expression.
-		In this case we delegate the decision to `haxe.Exception.thrown(e)`.
-		Because it could happen to be a wrapper for a wildcard catch.
-	*)
-	let is_stored_haxe_exception() =
-		is_haxe_exception ~check_parent:false e.etype
-		&& match e.eexpr with
-			| TNew(_,_,_) -> false
-			| _ -> true
-	in
-	is_stored_haxe_exception()
-	|| (not (is_native_throw cfg e.etype) && not (is_haxe_exception e.etype))
+	if cfg.ec_special_throw e then
+		false
+	else
+		(*
+			Check if `e` is of `haxe.Exception` type directly (not a descendant),
+			but not a `new haxe.Exception(...)` expression.
+			In this case we delegate the decision to `haxe.Exception.thrown(e)`.
+			Because it could happen to be a wrapper for a wildcard catch.
+		*)
+		let is_stored_haxe_exception() =
+			is_haxe_exception ~check_parent:false e.etype
+			&& match e.eexpr with
+				| TNew(_,_,_) -> false
+				| _ -> true
+		in
+		is_stored_haxe_exception()
+		|| (not (is_native_throw cfg e.etype) && not (is_haxe_exception e.etype))
 
 (**
 	Generate a throw of a native exception.
@@ -332,11 +336,11 @@ let catch_native ctx catches t p =
 				in
 				let transformed_catches = transform rest in
 				(* haxe.Exception.caught(catch_var) *)
-				let caught = haxe_exception_static_call ctx "caught" [catch_local] null_pos in
 				let exprs = [
 					(* var haxe_exception_local = haxe.Exception.caught(catch_var); *)
 					if !needs_haxe_exception then
-						(mk (TVar (haxe_exception_var, Some caught)) ctx.basic.tvoid null_pos)
+						let caught = haxe_exception_static_call ctx "caught" [catch_local] null_pos in
+						mk (TVar (haxe_exception_var, Some caught)) ctx.basic.tvoid null_pos
 					else
 						mk (TBlock[]) ctx.basic.tvoid null_pos;
 					(* var unwrapped_local = haxe_exception_local.unwrap(); *)
@@ -452,7 +456,10 @@ let insert_save_stacks tctx =
 					| _ -> error ("haxe.NativeStackTrace." ^ method_field.cf_name ^ " is not a function and cannot be called") null_pos
 				in
 				let catch_local = mk (TLocal catch_var) catch_var.v_type null_pos in
-				make_static_call tctx native_stack_trace_cls method_field (fun t -> t) [catch_local] return_type null_pos
+				begin
+					add_dependency tctx.curclass.cl_module native_stack_trace_cls.cl_module;
+					make_static_call tctx native_stack_trace_cls method_field (fun t -> t) [catch_local] return_type null_pos
+				end
 			else
 				mk (TBlock[]) tctx.t.tvoid null_pos
 		in
