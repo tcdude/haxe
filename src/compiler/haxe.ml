@@ -744,12 +744,6 @@ try
 			Common.define com Define.Jvm;
 			jvm_flag := true;
 			Initialize.set_platform com Java dir;
-		),"<directory>","generate JVM bytecode into target file");
-		("Target",["--jvm"],[],Arg.String (fun dir ->
-			cp_libs := "hxjava" :: !cp_libs;
-			Common.define com Define.Jvm;
-			jvm_flag := true;
-			Initialize.set_platform com Java dir;
 		),"<file>","generate JVM bytecode into target file");
 		("Target",["--python"],["-python"],Arg.String (fun dir ->
 			Initialize.set_platform com Python dir;
@@ -866,9 +860,6 @@ try
 		("Target-specific",["--java-lib-extern"],[],Arg.String (fun file ->
 			add_native_lib file true;
 		),"<file>","use an external JAR or directory of JAR files for type checking");
-		("Target-specific",["--java-lib-extern"],[],Arg.String (fun file ->
-			add_native_lib file true;
-		),"<file>","use an external JAR or class directory library for type checking");
 		("Target-specific",["--net-lib"],["-net-lib"],Arg.String (fun file ->
 			add_native_lib file false;
 		),"<file>[@std]","add an external .NET DLL file");
