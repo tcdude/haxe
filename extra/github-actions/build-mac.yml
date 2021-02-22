@@ -36,9 +36,3 @@
     ls -l out
     otool -L ./haxe
     otool -L ./haxelib
-
-- name: Upload artifact
-  uses: actions/upload-artifact@v1.0.0
-  with:
-    name: macBinaries
-    path: out
