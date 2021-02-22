@@ -25,11 +25,8 @@
     set -ex
     eval $(opam env)
     opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
-    opam config exec -- make -s haxelib
-    make -s package_unix
     ls -l out
     ldd -v ./haxe
-    ldd -v ./haxelib
 
 # https://stackoverflow.com/questions/58033366/how-to-get-current-branch-within-github-actions
 - name: Extract branch name
