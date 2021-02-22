@@ -108,7 +108,6 @@ jobs:
         run: |
           Set-PSDebug -Trace 1
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && opam config exec -- make -s -f Makefile.win -j`nproc` haxe 2>&1')
-          dir out
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && cygcheck ./haxe.exe')
       
 
@@ -205,7 +204,6 @@ jobs:
         run: |
           Set-PSDebug -Trace 1
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && opam config exec -- make -s -f Makefile.win -j`nproc` haxe 2>&1')
-          dir out
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && cygcheck ./haxe.exe')
       
 
@@ -274,7 +272,6 @@ jobs:
           set -ex
           eval $(opam env)
           opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
-          ls -l out
           ldd -v ./haxe
       
       # https://stackoverflow.com/questions/58033366/how-to-get-current-branch-within-github-actions
@@ -355,6 +352,5 @@ jobs:
           set -ex
           eval $(opam env)
           opam config exec -- make -s -j`sysctl -n hw.ncpu` STATICLINK=1 "LIB_PARAMS=/usr/local/opt/zlib/lib/libz.a /usr/local/lib/libpcre.a /usr/local/lib/libmbedtls.a /usr/local/lib/libmbedcrypto.a /usr/local/lib/libmbedx509.a -cclib '-framework Security -framework CoreFoundation'" haxe
-          ls -l out
           otool -L ./haxe
       
