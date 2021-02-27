@@ -27,8 +27,19 @@
     opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
     ldd -v ./haxe
 
-# https://stackoverflow.com/questions/58033366/how-to-get-current-branch-within-github-actions
-- name: Extract branch name
-  id: extract_branch
-  shell: bash
-  run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+- name: Get haxe_bin
+  run: git clone https://github.com/Kode/haxe_bin.git
+- name: Copy binary
+  run: cp ./haxe haxe_bin/haxe-linux64
+- name: Set name
+  run: git config --global user.name "Robbot"
+- name: Set email
+  run: git config --global user.email "robbot2019@robdangero.us"
+- name: Commit binary
+  run: git -C haxe_bin commit -a -m "Update Linux binary to $GITHUB_SHA."
+- name: Tag binary
+  run: git -C haxe_bin tag linux_$GITHUB_SHA
+- name: Push binary
+  run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags
+  env:
+    ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}

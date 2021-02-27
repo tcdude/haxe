@@ -111,102 +111,22 @@ jobs:
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && opam config exec -- make -s -f Makefile.win -j`nproc` haxe 2>&1')
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && cygcheck ./haxe.exe')
       
-
-  windows-build:
-    runs-on: windows-latest
-    env:
-      ACTIONS_ALLOW_UNSECURE_COMMANDS: true
-      PLATFORM: windows
-      OPAMYES: 1
-      CYG_MIRROR: http://mirrors.kernel.org/sourceware/cygwin/
-      ARCH: 32
-      MINGW_ARCH: i686
-      CYGWIN_SETUP: https://cygwin.com/setup-x86.exe
-      CYG_ROOT: C:/cygwin
-    steps:
-      - uses: actions/checkout@main
-        with:
-          submodules: recursive
-
-      - name: Install Neko using snapshot from S3 (Unix)
-        if: ${{ !startsWith(env.PLATFORM, 'windows') }}
-        run: |
-          set -ex
-      
-          curl -sSL https://build.haxe.org/builds/neko/$PLATFORM/neko_latest.tar.gz -o $RUNNER_TEMP/neko_latest.tar.gz
-          tar -xf $RUNNER_TEMP/neko_latest.tar.gz -C $RUNNER_TEMP
-          NEKOPATH=`echo $RUNNER_TEMP/neko-*-*`
-          sudo mkdir -p /usr/local/bin
-          sudo mkdir -p /usr/local/lib/neko
-          sudo ln -s $NEKOPATH/{neko,nekoc,nekoml,nekotools}  /usr/local/bin/
-          sudo ln -s $NEKOPATH/libneko.*                      /usr/local/lib/
-          sudo ln -s $NEKOPATH/*.ndll                         /usr/local/lib/neko/
-          echo "NEKOPATH=$NEKOPATH" >> $GITHUB_ENV
-      
-      - name: Install Neko using snapshot from S3 (Windows)
-        if: ${{ startsWith(env.PLATFORM, 'windows') }}
-        shell: pwsh
-        run: |
-          Invoke-WebRequest https://build.haxe.org/builds/neko/$env:PLATFORM/neko_latest.zip -OutFile $env:RUNNER_TEMP/neko_latest.zip
-          Expand-Archive $env:RUNNER_TEMP/neko_latest.zip -DestinationPath $env:RUNNER_TEMP
-          $NEKOPATH = Get-ChildItem $env:RUNNER_TEMP/neko-*-*
-          echo "$NEKOPATH" >> $env:GITHUB_PATH
-          echo "NEKOPATH=$NEKOPATH" >> $env:GITHUB_ENV
-      
-      - name: Print Neko version
-        run: neko -version 2>&1
-      
-      - name: choco install nsis
-        uses: nick-invision/retry@v1
-        with:
-          timeout_minutes: 10
-          max_attempts: 10
-          command: choco install --no-progress nsis.portable --version 3.02 -y
-      - name: choco install things
-        shell: pwsh
-        run: choco install --no-progress curl wget 7zip.portable -y
-      - name: Prepend Chocolatey path
-        shell: pwsh
-        run: Write-Host "::add-path::C:\ProgramData\chocolatey\bin"
-      
-      - name: Install OCaml and OCaml libraries
-        shell: pwsh
-        run: |
-          Set-PSDebug -Trace 1
-          curl.exe -fsSL -o cygwin-setup.exe --retry 3 $($env:CYGWIN_SETUP)
-          Start-Process -FilePath "cygwin-setup.exe" -ArgumentList "-B -q -R $($env:CYG_ROOT) -l C:/tmp -s $($env:CYG_MIRROR) -P default -P make -P git -P zlib-devel -P rsync -P patch -P diffutils -P curl -P unzip -P tar -P m4 -P perl -P libpcre-devel -P mbedtls-devel -P mingw64-$($env:MINGW_ARCH)-zlib -P mingw64-$($env:MINGW_ARCH)-gcc-core -P mingw64-$($env:MINGW_ARCH)-pcre" -Wait
-          curl.exe -fsSL -o "opam.tar.xz" --retry 3 https://github.com/fdopen/opam-repository-mingw/releases/download/0.0.0.2/opam$($env:ARCH).tar.xz
-          curl.exe -fsSL -o "libmbedtls.tar.xz" --retry 3 https://github.com/Simn/mingw64-mbedtls/releases/download/2.16.3/mingw64-$($env:MINGW_ARCH)-mbedtls-2.16.3-1.tar.xz
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'curl -L https://cpanmin.us | perl - App::cpanminus')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cpanm IPC::System::Simple module')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cpanm String::ShellQuote')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'echo "$OLDPWD"')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && tar -C / -xvf libmbedtls.tar.xz')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && tar -xf opam.tar.xz')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && bash opam${ARCH}/install.sh')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'opam init mingw "https://github.com/fdopen/opam-repository-mingw.git#opam2" --comp 4.07.0+mingw${ARCH}c --switch 4.07.0+mingw${ARCH}c --auto-setup --yes 2>&1')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'opam update --yes 2>&1')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && opam pin add haxe . --kind=path --no-action --yes 2>&1')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'opam pin add ctypes 0.17.1 --yes 2>&1')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'opam install haxe --deps-only --yes 2>&1')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'opam list')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'ocamlopt -v')
-      
-      - name: Expose mingw dll files
-        shell: pwsh
-        run: Write-Host "::add-path::${env:CYG_ROOT}/usr/$($env:MINGW_ARCH)-w64-mingw32/sys-root/mingw/bin"
-      
-      - name: Set ADD_REVISION=1 for non-release
-        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-        shell: pwsh
-        run: echo "ADD_REVISION=1" >> $Env:GITHUB_ENV
-      
-      - name: Build Haxe
-        shell: pwsh
-        run: |
-          Set-PSDebug -Trace 1
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && opam config exec -- make -s -f Makefile.win -j`nproc` haxe 2>&1')
-          & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && cygcheck ./haxe.exe')
+       - name: Get haxe_bin
+            run: git clone https://github.com/Kode/haxe_bin.git
+          - name: Copy binary
+            run: copy haxe.exe haxe_bin\haxe.exe
+          - name: Set name
+            run: git config --global user.name "Robbot"
+          - name: Set email
+            run: git config --global user.email "robbot2019@robdangero.us"
+          - name: Commit binary
+            run: git -C haxe_bin commit -a -m "Update Windows binary to ${env:GITHUB_SHA}."
+          - name: Tag binary
+            run: git -C haxe_bin tag windows_${env:GITHUB_SHA}
+          - name: Push binary
+            run: git -C haxe_bin push https://Kode-Robbot:${env:ROBBOT_PASS}@github.com/Kode/haxe_bin.git master --tags
+            env:
+              ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
       
 
   linux-build:
@@ -276,11 +196,22 @@ jobs:
           opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
           ldd -v ./haxe
       
-      # https://stackoverflow.com/questions/58033366/how-to-get-current-branch-within-github-actions
-      - name: Extract branch name
-        id: extract_branch
-        shell: bash
-        run: echo "##[set-output name=branch;]$(echo ${GITHUB_REF#refs/heads/})"
+      - name: Get haxe_bin
+        run: git clone https://github.com/Kode/haxe_bin.git
+      - name: Copy binary
+        run: cp ./haxe haxe_bin/haxe-linux64
+      - name: Set name
+        run: git config --global user.name "Robbot"
+      - name: Set email
+        run: git config --global user.email "robbot2019@robdangero.us"
+      - name: Commit binary
+        run: git -C haxe_bin commit -a -m "Update Linux binary to $GITHUB_SHA."
+      - name: Tag binary
+        run: git -C haxe_bin tag linux_$GITHUB_SHA
+      - name: Push binary
+        run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags
+        env:
+          ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
       
 
   mac-build:
@@ -376,4 +307,21 @@ jobs:
           eval $(opam env)
           opam config exec -- make -s -j`sysctl -n hw.ncpu` STATICLINK=1 "LIB_PARAMS=/usr/local/lib/libz.a /usr/local/lib/libpcre.a /usr/local/lib/libmbedtls.a /usr/local/lib/libmbedcrypto.a /usr/local/lib/libmbedx509.a -cclib '-framework Security -framework CoreFoundation'" haxe
           otool -L ./haxe
+      
+      - name: Get haxe_bin
+        run: git clone https://github.com/Kode/haxe_bin.git
+      - name: Copy binary
+        run: cp ./haxe haxe_bin/haxe-osx
+      - name: Set name
+        run: git config --global user.name "Robbot"
+      - name: Set email
+        run: git config --global user.email "robbot2019@robdangero.us"
+      - name: Commit binary
+        run: git -C haxe_bin commit -a -m "Update macOS binary to $GITHUB_SHA."
+      - name: Tag binary
+        run: git -C haxe_bin tag macos_$GITHUB_SHA
+      - name: Push binary
+        run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags
+        env:
+          ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
       

@@ -52,3 +52,20 @@
     eval $(opam env)
     opam config exec -- make -s -j`sysctl -n hw.ncpu` STATICLINK=1 "LIB_PARAMS=/usr/local/lib/libz.a /usr/local/lib/libpcre.a /usr/local/lib/libmbedtls.a /usr/local/lib/libmbedcrypto.a /usr/local/lib/libmbedx509.a -cclib '-framework Security -framework CoreFoundation'" haxe
     otool -L ./haxe
+
+- name: Get haxe_bin
+  run: git clone https://github.com/Kode/haxe_bin.git
+- name: Copy binary
+  run: cp ./haxe haxe_bin/haxe-osx
+- name: Set name
+  run: git config --global user.name "Robbot"
+- name: Set email
+  run: git config --global user.email "robbot2019@robdangero.us"
+- name: Commit binary
+  run: git -C haxe_bin commit -a -m "Update macOS binary to $GITHUB_SHA."
+- name: Tag binary
+  run: git -C haxe_bin tag macos_$GITHUB_SHA
+- name: Push binary
+  run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags
+  env:
+    ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
