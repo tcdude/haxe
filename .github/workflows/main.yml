@@ -111,22 +111,22 @@ jobs:
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && opam config exec -- make -s -f Makefile.win -j`nproc` haxe 2>&1')
           & "$($env:CYG_ROOT)/bin/bash.exe" @('-lc', 'cd "$OLDPWD" && cygcheck ./haxe.exe')
       
-       - name: Get haxe_bin
-            run: git clone https://github.com/Kode/haxe_bin.git
-          - name: Copy binary
-            run: copy haxe.exe haxe_bin\haxe.exe
-          - name: Set name
-            run: git config --global user.name "Robbot"
-          - name: Set email
-            run: git config --global user.email "robbot2019@robdangero.us"
-          - name: Commit binary
-            run: git -C haxe_bin commit -a -m "Update Windows binary to ${env:GITHUB_SHA}."
-          - name: Tag binary
-            run: git -C haxe_bin tag windows_${env:GITHUB_SHA}
-          - name: Push binary
-            run: git -C haxe_bin push https://Kode-Robbot:${env:ROBBOT_PASS}@github.com/Kode/haxe_bin.git master --tags
-            env:
-              ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
+      - name: Get haxe_bin
+          run: git clone https://github.com/Kode/haxe_bin.git
+        - name: Copy binary
+          run: copy haxe.exe haxe_bin\haxe.exe
+        - name: Set name
+          run: git config --global user.name "Robbot"
+        - name: Set email
+          run: git config --global user.email "robbot2019@robdangero.us"
+        - name: Commit binary
+          run: git -C haxe_bin commit -a -m "Update Windows binary to ${env:GITHUB_SHA}."
+        - name: Tag binary
+          run: git -C haxe_bin tag windows_${env:GITHUB_SHA}
+        - name: Push binary
+          run: git -C haxe_bin push https://Kode-Robbot:${env:ROBBOT_PASS}@github.com/Kode/haxe_bin.git master --tags
+          env:
+            ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
       
 
   linux-build:
