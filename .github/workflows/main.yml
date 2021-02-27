@@ -210,7 +210,7 @@ jobs:
       
 
   linux-build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     env:
       PLATFORM: linux64
       OPAMYES: 1
