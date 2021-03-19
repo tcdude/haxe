@@ -371,6 +371,8 @@ jobs:
         run: git config --global user.name "Robbot"
       - name: Set email
         run: git config --global user.email "robbot2019@robdangero.us"
+      - name: Add binary
+        run: git -C haxe_bin add -A
       - name: Commit binary
         run: git -C haxe_bin commit -a -m "Update FreeBSD binary to $GITHUB_SHA."
       - name: Tag binary
