@@ -13,13 +13,14 @@
   with:
     envs: 'ROBBOT_PASS'
     usesh: true
+    mem: 2048
     prepare: pkg install -y ocaml ocaml-opam p5-string-shellquote p5-IPC-System-Simple pkgconf neko pcre gmake lzlib
     run: |
       set -ex
       opam init # --disable-sandboxing
       opam update
       opam pin add haxe . --no-action
-      opam install haxe --deps-only
+      opam install haxe --deps-only -y
       opam list
       ocamlopt -v
       eval $(opam env)
