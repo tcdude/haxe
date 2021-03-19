@@ -8,10 +8,8 @@
 - name: Build in FreeBSD VM
   id: build
   uses: vmactions/freebsd-vm@v0.1.3
-  env:
-    ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
   with:
-    envs: 'ROBBOT_PASS OPAMYES'
+    envs: 'OPAMYES'
     usesh: true
     mem: 2048
     prepare: pkg install -y ocaml ocaml-opam p5-string-shellquote p5-IPC-System-Simple pkgconf neko pcre gmake lzlib
@@ -24,7 +22,7 @@
       opam list
       ocamlopt -v
       eval $(opam env)
-      opam config exec -- make -s -j3 STATICLINK=1 haxe
+      gmake -s -j3 STATICLINK=1 haxe
       ldd -v ./haxe
 
 - name: Get haxe_bin
