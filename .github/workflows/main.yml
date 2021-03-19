@@ -349,7 +349,7 @@ jobs:
         env:
           ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
         with:
-          envs: 'ROBBOT_PASS'
+          envs: 'ROBBOT_PASS OPAMYES'
           usesh: true
           mem: 2048
           prepare: pkg install -y ocaml ocaml-opam p5-string-shellquote p5-IPC-System-Simple pkgconf neko pcre gmake lzlib
@@ -358,11 +358,11 @@ jobs:
             opam init # --disable-sandboxing
             opam update
             opam pin add haxe . --no-action
-            opam install haxe --deps-only -y
+            opam install haxe --deps-only
             opam list
             ocamlopt -v
             eval $(opam env)
-            opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
+            opam config exec -- make -s -j3 STATICLINK=1 haxe
             ldd -v ./haxe
       
       - name: Get haxe_bin
