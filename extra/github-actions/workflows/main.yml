@@ -59,3 +59,15 @@ jobs:
 
       @import install-neko.yml
       @import build-mac.yml
+
+  freebsd-build:
+    runs-on: macos-latest
+    env:
+      PLATTFORM: freebsd64
+      OPAMYES: 1
+    steps:
+      - uses: actions/checkout@main
+        with:
+          submodules: recursive
+
+      @import build-freebsd.yml

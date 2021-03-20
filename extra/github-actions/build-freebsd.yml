@@ -1,0 +1,45 @@
+- name: Apply dune patch for FreeBSD
+  run: git apply extra/github-actions/patches/dune.patch
+
+- name: Set ADD_REVISION=1 for non-release
+  if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  run: echo "ADD_REVISION=1" >> $GITHUB_ENV
+
+- name: Build in FreeBSD VM
+  id: build
+  uses: vmactions/freebsd-vm@v0.1.3
+  with:
+    envs: 'OPAMYES'
+    usesh: true
+    mem: 2048
+    prepare: pkg install -y ocaml ocaml-opam p5-string-shellquote p5-IPC-System-Simple pkgconf neko pcre gmake lzlib
+    run: |
+      set -ex
+      opam init # --disable-sandboxing
+      opam update
+      opam pin add haxe . --no-action
+      opam install haxe --deps-only
+      opam list
+      ocamlopt -v
+      eval $(opam env)
+      gmake -s -j3 STATICLINK=1 haxe
+      ldd -v ./haxe
+
+- name: Get haxe_bin
+  run: git clone https://github.com/Kode/haxe_bin.git
+- name: Copy binary
+  run: cp ./haxe haxe_bin/haxe-freebsd
+- name: Set name
+  run: git config --global user.name "Robbot"
+- name: Set email
+  run: git config --global user.email "robbot2019@robdangero.us"
+- name: Add binary
+  run: git -C haxe_bin add -A
+- name: Commit binary
+  run: git -C haxe_bin commit -a -m "Update FreeBSD binary to $GITHUB_SHA."
+- name: Tag binary
+  run: git -C haxe_bin tag freebsd_$GITHUB_SHA
+- name: Push binary
+  run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags
+  env:
+    ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
