@@ -350,7 +350,7 @@ jobs:
           envs: 'OPAMYES'
           usesh: true
           mem: 2048
-          prepare: pkg install -y ocaml ocaml-opam p5-string-shellquote p5-IPC-System-Simple pkgconf neko pcre gmake lzlib
+          prepare: pkg install -y ocaml ocaml-opam p5-string-shellquote p5-IPC-System-Simple pkgconf neko pcre gmake lzlib bash
           run: |
             set -ex
             opam init # --disable-sandboxing
