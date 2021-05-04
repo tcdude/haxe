@@ -451,39 +451,45 @@ jobs:
               make install
       
           # Produce a binary artifact and place it in the mounted volume
-          - name: OPAM Init
-            run: |
-              set -ex
-              opam init -a --disable-sandboxing
-          - name: OPAM Update
-            run: |
-              set -ex
-              opam update
-          - name: OPAM Pin
-            run: |
-              set -ex
-              opam pin add haxe . --no-action
-          - name: OPAM Install Haxe
-            run: |
-              set -ex
-              opam install haxe --deps-only
-          - name: OPAM List
-            run: |
-              set -ex
-              opam list
-          - name: Compile Haxe
-            run: |
-              set -ex
-              ocamlopt -v
-              eval $(opam env)
-              opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
-          - name: Verify Haxe
-            run: |
-              set -ex
-              ldd -v ./haxe
-          - name: Copy artifact
-              set -ex
-              cp ./haxe "/artifacts/${artifact_name}"
+          run: |
+            set -ex
+            echo "*********************************************************"
+            echo "* OPAM Init                                             *"
+            echo "*********************************************************"
+            opam init -a --disable-sandboxing
+            echo "*********************************************************"
+            echo "* OPAM Update                                           *"
+            echo "*********************************************************"
+            opam update
+            echo "*********************************************************"
+            echo "* OPAM Pin                                              *"
+            echo "*********************************************************"
+            opam pin add haxe . --no-action
+            echo "*********************************************************"
+            echo "* OPAM Install deps                                     *"
+            echo "*********************************************************"
+            opam install haxe --deps-only
+            echo "*********************************************************"
+            echo "* OPAM List                                             *"
+            echo "*********************************************************"
+            opam list
+            echo "*********************************************************"
+            echo "* ocamlopt                                              *"
+            echo "*********************************************************"
+            ocamlopt -v
+            eval $(opam env)
+            echo "*********************************************************"
+            echo "* Compile Haxe                                          *"
+            echo "*********************************************************"
+            opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
+            echo "*********************************************************"
+            echo "* Verify artifact                                       *"
+            echo "*********************************************************"
+            ldd -v ./haxe
+            echo "*********************************************************"
+            echo "* Copy binary                                           *"
+            echo "*********************************************************"
+            cp ./haxe "/artifacts/${artifact_name}"
       
       - name: Get haxe_bin
         run: git clone https://github.com/Kode/haxe_bin.git
