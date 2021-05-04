@@ -410,6 +410,8 @@ jobs:
       - uses: uraimo/run-on-arch-action@v2.0.9
         name: Build artifact
         id: build
+        env:
+          OPAMYES: 1
         with:
           arch: ${{ matrix.arch }}
           distro: ${{ matrix.distro }}
