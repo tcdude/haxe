@@ -443,7 +443,7 @@ jobs:
           install: |
               apt-get update -y -q
               apt-get upgrade -y -q
-              apt-get install -y -q git build-essential ocaml neko libpcre3-dev zlib1g-dev libipc-system-simple-perl libstring-shellquote-perl wget unzip libgtk2.0-dev libmbedtls-dev ninja-build
+              apt-get install -y -q git build-essential ocaml neko libpcre3-dev zlib1g-dev libipc-system-simple-perl libstring-shellquote-perl wget unzip libgtk2.0-dev libmbedtls-dev ninja-build m4
               wget https://github.com/ocaml/opam/releases/download/2.0.2/opam-full-2.0.2.tar.gz
               tar xvf opam-full-2.0.2.tar.gz
               cd opam-full-2.0.2
