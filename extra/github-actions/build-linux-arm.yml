@@ -41,7 +41,7 @@
     # Produce a binary artifact and place it in the mounted volume
     run: |
       set -ex
-      opam init # --disable-sandboxing
+      opam init -a # --disable-sandboxing
       opam update
       opam pin add haxe . --no-action
       opam install haxe --deps-only
