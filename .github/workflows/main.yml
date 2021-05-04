@@ -394,7 +394,7 @@ jobs:
           - arch: aarch64
             distro: stretch
           - arch: armv6
-            distro: jessie
+            distro: stretch
     env:
       PLATFORM: linuxarm
       OPAMYES: 1
