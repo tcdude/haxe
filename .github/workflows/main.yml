@@ -382,3 +382,96 @@ jobs:
         env:
           ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
       
+
+  linux-arm-build:
+    runs-on: ubuntu-18.04
+    name: Build on ${{ matrix.distro }} ${{ matrix.arch }}
+
+    # Run steps for both armv6 and aarch64
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            distro: stretch
+          - arch: armv6
+            distro: jessie
+    env:
+      PLATFORM: linuxarm
+      OPAMYES: 1
+    steps:
+      - uses: actions/checkout@main
+        with:
+          submodules: recursive
+
+      - name: Set ADD_REVISION=1 for non-release
+        if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+        run: echo "ADD_REVISION=1" >> $GITHUB_ENV
+      
+      - uses: uraimo/run-on-arch-action@v2.0.9
+        name: Build artifact
+        id: build
+        with:
+          arch: ${{ matrix.arch }}
+          distro: ${{ matrix.distro }}
+      
+          # Not required, but speeds up builds
+          githubToken: ${{ github.token }}
+      
+          # Create an artifacts directory
+          setup: |
+            mkdir -p "${PWD}/artifacts"
+      
+          # Mount the artifacts directory as /artifacts in the container
+          dockerRunArgs: |
+            --volume "${PWD}/artifacts:/artifacts"
+      
+          # Pass the correct artifact name
+          env: | # YAML, but pipe character is necessary
+            artifact_name: haxe-linux-${{ matrix.arch }}
+      
+          # The shell to run commands with in the container
+          shell: /bin/bash
+      
+          # Install some dependencies in the container. This speeds up builds if
+          # you are also using githubToken. Any dependencies installed here will
+          # be part of the container image that gets cached, so subsequent
+          # builds don't have to re-install them. The image layer is cached
+          # publicly in your project's package repository, so it is vital that
+          # no secrets are present in the container state or logs.
+          install: |
+              apt-get update -y -q
+              apt-get upgrade -y -q
+              apt-get install -y -q git build-essential ocaml ocaml-opam neko libpcre3-dev zlib1g-dev libipc-system-simple-perl libstring-shellquote-perl
+      
+          # Produce a binary artifact and place it in the mounted volume
+          run: |
+            set -ex
+            opam init # --disable-sandboxing
+            opam update
+            opam pin add haxe . --no-action
+            opam install haxe --deps-only
+            opam list
+            ocamlopt -v
+            eval $(opam env)
+            opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
+            ldd -v ./haxe
+      
+      - name: Get haxe_bin
+        run: git clone https://github.com/Kode/haxe_bin.git
+      - name: Copy armv6 binary
+        run: cp "${PWD}/artifacts/haxe-linux-armv6" haxe_bin/haxe-linux-armv6 && git -C haxe_bin add haxe-linux-armv6 && BUILDARCH=armv6 || echo "armv6 not yet present..."
+      - name: Copy aarch64 binary
+        run: cp "${PWD}/artifacts/haxe-linux-aarch64" haxe_bin/haxe-linux-aarch64 && git -C haxe_bin add haxe-linux-aarch64 && BUILDARCH=aarch64 || echo "aarch64 not yet present..."
+      - name: Set name
+        run: git config --global user.name "Robbot"
+      - name: Set email
+        run: git config --global user.email "robbot2019@robdangero.us"
+      - name: Commit binary
+        run: git -C haxe_bin commit -a -m "Update Linux-ARM binary to $GITHUB_SHA."
+      - name: Tag binary
+        run: git -C haxe_bin tag linux_$BUILDARCH_$GITHUB_SHA
+      - name: Push binary
+        run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags
+        env:
+          ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
+      
