@@ -446,6 +446,7 @@ jobs:
               tar xvf opam-full-2.0.2.tar.gz
               cd opam-full-2.0.2
               ./configure
+              make lib-ext
               make
               make install
       
