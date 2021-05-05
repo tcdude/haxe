@@ -392,9 +392,9 @@ jobs:
       matrix:
         include:
           - arch: aarch64
-            distro: buster
+            distro: stretch
           - arch: armv6
-            distro: buster
+            distro: stretch
     env:
       PLATFORM: linuxarm
       OPAMYES: 1
@@ -443,7 +443,14 @@ jobs:
           install: |
               apt-get update -y -q
               apt-get upgrade -y -q
-              apt-get install -y -q git build-essential ocaml neko libpcre3-dev zlib1g-dev libipc-system-simple-perl libstring-shellquote-perl curl wget unzip libgtk2.0-dev libmbedtls-dev ninja-build m4 libctypes-ocaml-dev libctypes-ocaml libffi-dev libncurses5-dev pkg-config rsync opam
+              apt-get install -y -q git build-essential ocaml neko libpcre3-dev zlib1g-dev libipc-system-simple-perl libstring-shellquote-perl wget unzip libgtk2.0-dev libmbedtls-dev ninja-build m4 libctypes-ocaml-dev libctypes-ocaml libffi-dev libncurses5-dev pkg-config
+              wget https://github.com/ocaml/opam/releases/download/2.0.2/opam-full-2.0.2.tar.gz
+              tar xvf opam-full-2.0.2.tar.gz
+              cd opam-full-2.0.2
+              ./configure
+              make lib-ext
+              make
+              make install
       
           # Produce a binary artifact and place it in the mounted volume
           run: |
