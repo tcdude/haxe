@@ -81,9 +81,9 @@ jobs:
       matrix:
         include:
           - arch: aarch64
-            distro: buster
-          - arch: armv6
-            distro: buster
+            distro: stretch
+          - arch: armv7
+            distro: stretch
     env:
       PLATFORM: linuxarm
       OPAMYES: 1
