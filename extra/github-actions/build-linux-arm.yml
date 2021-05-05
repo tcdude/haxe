@@ -43,11 +43,7 @@
       apt-get upgrade -y -q
       apt-get install -y -q build-essential m4 unzip libpcre3-dev zlib1g-dev neko git pkg-config libipc-system-simple-perl libstring-shellquote-perl wget cmake python3
       # Installing OPAM
-      [[ $(uname -m) == aarch64* ]] \
-        && wget -O opam https://github.com/ocaml/opam/releases/download/2.0.8/opam-2.0.8-arm64-linux \
-        && chmod +x opam \
-        && mv opam /usr/bin \
-        || apt-get install -y -q ocaml \
+      apt-get install -y -q ocaml \
         && wget https://github.com/ocaml/opam/releases/download/2.0.8/opam-full-2.0.8.tar.gz \
         && tar xvf opam-full-2.0.8.tar.gz \
         && cd opam-full-2.0.8 \
