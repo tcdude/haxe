@@ -393,7 +393,7 @@ jobs:
         include:
           - arch: aarch64
             distro: stretch
-          - arch: armv7
+          - arch: armv6
             distro: stretch
     env:
       PLATFORM: linuxarm
@@ -447,15 +447,26 @@ jobs:
             apt-get update -y -q
             apt-get upgrade -y -q
             apt-get install -y -q build-essential m4 unzip libpcre3-dev zlib1g-dev neko git pkg-config libipc-system-simple-perl libstring-shellquote-perl wget cmake python3
-            [[ $(uname -m) == aarch64* ]] && wget -O opam https://github.com/ocaml/opam/releases/download/2.0.8/opam-2.0.8-arm64-linux || wget -O opam https://github.com/ocaml/opam/releases/download/2.0.8/opam-2.0.8-armhf-linux
-            chmod +x opam
-            mv opam /usr/bin
+            [[ $(uname -m) == aarch64* ]] \
+              && wget -O opam https://github.com/ocaml/opam/releases/download/2.0.8/opam-2.0.8-arm64-linux \
+              && chmod +x opam \
+              && mv opam /usr/bin \
+              || apt-get install -y -q ocaml \
+              && wget https://github.com/ocaml/opam/releases/download/2.0.8/opam-full-2.0.8.tar.gz \
+              && tar xvf opam-full-2.0.8.tar.gz \
+              && cd opam-full-2.0.8 \
+              && ./configure \
+              && make lib-ext \
+              && make \
+              && make install \
+              && cd .. \
+              && rm -rf opam-full*
             wget https://github.com/ARMmbed/mbedtls/archive/refs/tags/v2.26.0.tar.gz
             tar xvf v2.26.0.tar.gz
             cd mbedtls-2.26.0
             mkdir build && cd build
-            cmake ..
-            make
+            cmake -DENABLE_TESTING=Off ..
+            make -j`nproc`
             make install
             cd ../..
             rm -rf mbedtls-2.26.0
@@ -482,7 +493,7 @@ jobs:
       - name: Get haxe_bin
         run: git clone https://github.com/Kode/haxe_bin.git
       - name: Copy armv7 binary
-        run: cp "${PWD}/artifacts/haxe-linux-armv7" haxe_bin/haxe-linux-armv7 && git -C haxe_bin add haxe-linux-armv7 && BUILDARCH=armv7 || echo "armv7 not yet present..."
+        run: cp "${PWD}/artifacts/haxe-linux-armv6" haxe_bin/haxe-linux-armv6 && git -C haxe_bin add haxe-linux-armv6 && BUILDARCH=armv7 || echo "armv6 not yet present..."
       - name: Copy aarch64 binary
         run: cp "${PWD}/artifacts/haxe-linux-aarch64" haxe_bin/haxe-linux-aarch64 && git -C haxe_bin add haxe-linux-aarch64 && BUILDARCH=aarch64 || echo "aarch64 not yet present..."
       - name: Set name

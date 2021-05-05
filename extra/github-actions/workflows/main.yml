@@ -82,7 +82,7 @@ jobs:
         include:
           - arch: aarch64
             distro: stretch
-          - arch: armv7
+          - arch: armv6
             distro: stretch
     env:
       PLATFORM: linuxarm
