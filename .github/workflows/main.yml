@@ -447,6 +447,7 @@ jobs:
             apt-get update -y -q
             apt-get upgrade -y -q
             apt-get install -y -q build-essential m4 unzip libpcre3-dev zlib1g-dev neko git pkg-config libipc-system-simple-perl libstring-shellquote-perl wget cmake python3
+            # Installing OPAM
             [[ $(uname -m) == aarch64* ]] \
               && wget -O opam https://github.com/ocaml/opam/releases/download/2.0.8/opam-2.0.8-arm64-linux \
               && chmod +x opam \
@@ -461,6 +462,7 @@ jobs:
               && make install \
               && cd .. \
               && rm -rf opam-full*
+            # Installing mbedtls
             wget https://github.com/ARMmbed/mbedtls/archive/refs/tags/v2.26.0.tar.gz
             tar xvf v2.26.0.tar.gz
             cd mbedtls-2.26.0
@@ -471,6 +473,7 @@ jobs:
             cd ../..
             rm -rf mbedtls-2.26.0
             rm v2.26.0.tar.gz
+            # Installing ocaml 4.11.1
             opam init -a --disable-sandboxing
             eval $(opam env)
             opam update
