@@ -74,8 +74,8 @@
 
 - name: Get haxe_bin
   run: git clone https://github.com/Kode/haxe_bin.git
-- name: Copy armv6 binary
-  run: cp "${PWD}/artifacts/haxe-linux-armv6" haxe_bin/haxe-linux-armv6 && git -C haxe_bin add haxe-linux-armv6 && BUILDARCH=armv6 || echo "armv6 not yet present..."
+- name: Copy armv7 binary
+  run: cp "${PWD}/artifacts/haxe-linux-armv7" haxe_bin/haxe-linux-armv7 && git -C haxe_bin add haxe-linux-armv7 && BUILDARCH=armv7 || echo "armv7 not yet present..."
 - name: Copy aarch64 binary
   run: cp "${PWD}/artifacts/haxe-linux-aarch64" haxe_bin/haxe-linux-aarch64 && git -C haxe_bin add haxe-linux-aarch64 && BUILDARCH=aarch64 || echo "aarch64 not yet present..."
 - name: Set name
