@@ -80,8 +80,8 @@ jobs:
     strategy:
       matrix:
         include:
-          #- arch: aarch64
-          #  distro: stretch
+          - arch: aarch64
+            distro: stretch
           - arch: armv7
             distro: stretch
     env:
