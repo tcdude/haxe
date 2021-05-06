@@ -71,3 +71,25 @@ jobs:
           submodules: recursive
 
       @import build-freebsd.yml
+
+  linux-arm-build:
+    runs-on: ubuntu-18.04
+    name: Build on ${{ matrix.distro }} ${{ matrix.arch }}
+
+    # Run steps for both armv6 and aarch64
+    strategy:
+      matrix:
+        include:
+          - arch: aarch64
+            distro: ubuntu16.04
+          - arch: armv6
+            distro: stretch
+    env:
+      PLATFORM: linuxarm
+      OPAMYES: 1
+    steps:
+      - uses: actions/checkout@main
+        with:
+          submodules: recursive
+
+      @import build-linux-arm.yml
