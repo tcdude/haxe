@@ -502,7 +502,7 @@ jobs:
       - name: Commit binary
         run: git -C haxe_bin commit -a -m "Update Linux-ARM binary to $GITHUB_SHA."
       - name: Tag binary
-        run: git -C haxe_bin tag linux_$BUILDARCH_$GITHUB_SHA && echo "Using tag 'linux_$BUILDARCH_$GITHUB_SHA'"
+        run: git -C haxe_bin tag linux$BUILDARCH-$GITHUB_SHA && echo "Using tag 'linux$BUILDARCH-$GITHUB_SHA'"
       - name: Push binary
         run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags || echo "Push binary only works on the original repo"
         env:
