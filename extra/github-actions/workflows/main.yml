@@ -81,7 +81,7 @@ jobs:
       matrix:
         include:
           - arch: aarch64
-            distro: stretch
+            distro: ubuntu16.04
           - arch: armv6
             distro: stretch
     env:
