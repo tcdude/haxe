@@ -86,10 +86,10 @@
 
 - name: Get haxe_bin
   run: git clone https://github.com/Kode/haxe_bin.git
-- name: Copy armv7 binary
-  run: cp "${PWD}/artifacts/haxe-linux-armv6" haxe_bin/haxe-linux-armv6 && git -C haxe_bin add haxe-linux-armv6 && BUILDARCH=armv6 || echo "armv6 not yet present..."
+- name: Copy armv6 binary
+  run: cp "${PWD}/artifacts/haxe-linux-armv6" haxe_bin/haxe-linux-armv6 && git -C haxe_bin add haxe-linux-armv6 && echo "BUILDARCH=armv6" >> $GITHUB_ENV || echo "Not a armv6 run"
 - name: Copy aarch64 binary
-  run: cp "${PWD}/artifacts/haxe-linux-aarch64" haxe_bin/haxe-linux-aarch64 && git -C haxe_bin add haxe-linux-aarch64 && BUILDARCH=aarch64 || echo "aarch64 not yet present..."
+  run: cp "${PWD}/artifacts/haxe-linux-aarch64" haxe_bin/haxe-linux-aarch64 && git -C haxe_bin add haxe-linux-aarch64 && echo "BUILDARCH=aarch64" >> $GITHUB_ENV || echo "Not a aarch64 run"
 - name: Set name
   run: git config --global user.name "Robbot"
 - name: Set email
