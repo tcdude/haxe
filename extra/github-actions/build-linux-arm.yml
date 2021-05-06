@@ -1,0 +1,104 @@
+- name: Set ADD_REVISION=1 for non-release
+  if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  run: echo "ADD_REVISION=1" >> $GITHUB_ENV
+
+- uses: uraimo/run-on-arch-action@v2.0.9
+  name: Build artifact
+  id: build
+  env:
+    OPAMYES: 1
+  with:
+    arch: ${{ matrix.arch }}
+    distro: ${{ matrix.distro }}
+
+    # Not required, but speeds up builds
+    githubToken: ${{ github.token }}
+
+    # Create an artifacts directory
+    setup: |
+      mkdir -p "${PWD}/artifacts"
+
+    # Mount the artifacts directory as /artifacts in the container
+    dockerRunArgs: |
+      --volume "${PWD}/artifacts:/artifacts"
+
+    # Pass the correct artifact name
+    env: | # YAML, but pipe character is necessary
+      artifact_name: haxe-linux-${{ matrix.arch }}
+      arch: ${{ matrix.arch }}
+
+    # The shell to run commands with in the container
+    shell: /bin/bash
+
+    # Install some dependencies in the container. This speeds up builds if
+    # you are also using githubToken. Any dependencies installed here will
+    # be part of the container image that gets cached, so subsequent
+    # builds don't have to re-install them. The image layer is cached
+    # publicly in your project's package repository, so it is vital that
+    # no secrets are present in the container state or logs.
+    install: |
+      set -ex
+      cd ~
+      apt-get update -y -q
+      apt-get upgrade -y -q
+      apt-get install -y -q build-essential m4 unzip libpcre3-dev zlib1g-dev neko git pkg-config libipc-system-simple-perl libstring-shellquote-perl wget cmake python3
+      # Installing OPAM
+      apt-get install -y -q ocaml \
+        && wget https://github.com/ocaml/opam/releases/download/2.0.8/opam-full-2.0.8.tar.gz \
+        && tar xvf opam-full-2.0.8.tar.gz \
+        && cd opam-full-2.0.8 \
+        && ./configure \
+        && make lib-ext \
+        && make \
+        && make install \
+        && cd .. \
+        && rm -rf opam-full*
+      # Installing mbedtls
+      wget https://github.com/ARMmbed/mbedtls/archive/refs/tags/v2.26.0.tar.gz
+      tar xvf v2.26.0.tar.gz
+      cd mbedtls-2.26.0
+      mkdir build && cd build
+      cmake -DENABLE_TESTING=Off ..
+      make -j`nproc`
+      make install
+      cd ../..
+      rm -rf mbedtls-2.26.0
+      rm v2.26.0.tar.gz
+      # Installing ocaml 4.11.1
+      opam init -a --disable-sandboxing
+      eval $(opam env)
+      opam update
+      opam switch create 4.11.1
+
+    # Produce a binary artifact and place it in the mounted volume
+    run: |
+      set -ex
+      opam init -a --disable-sandboxing
+      opam update
+      opam pin add haxe . --no-action
+      opam install haxe --deps-only -y
+      opam list
+      ocamlopt -v
+      eval $(opam env)
+      opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
+      ldd -v ./haxe || file ./haxe
+      cp ./haxe "/artifacts/${artifact_name}"
+
+- name: Get haxe_bin
+  run: git clone https://github.com/Kode/haxe_bin.git
+- name: Copy armv6 binary
+  run: cp "${PWD}/artifacts/haxe-linux-armv6" haxe_bin/haxe-linux-armv6 && git -C haxe_bin add haxe-linux-armv6 && echo "BUILDARCH=armv6" >> $GITHUB_ENV || echo "Not a armv6 run"
+- name: Copy aarch64 binary
+  run: cp "${PWD}/artifacts/haxe-linux-aarch64" haxe_bin/haxe-linux-aarch64 && git -C haxe_bin add haxe-linux-aarch64 && echo "BUILDARCH=aarch64" >> $GITHUB_ENV || echo "Not a aarch64 run"
+- name: Set name
+  run: git config --global user.name "Robbot"
+- name: Set email
+  run: git config --global user.email "robbot2019@robdangero.us"
+- name: Commit binary
+  run: git -C haxe_bin commit -a -m "Update Linux-ARM binary to $GITHUB_SHA."
+- name: Tag binary
+  run: git -C haxe_bin tag linux$BUILDARCH-$GITHUB_SHA && echo "Using tag 'linux$BUILDARCH-$GITHUB_SHA'"
+- name: Push binary
+  run: git -C haxe_bin push https://Kode-Robbot:$ROBBOT_PASS@github.com/Kode/haxe_bin.git master --tags || echo "Push binary only works on the original repo"
+  env:
+    ROBBOT_PASS: ${{ secrets.ROBBOT_PASS }}
