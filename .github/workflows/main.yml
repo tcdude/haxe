@@ -486,7 +486,7 @@ jobs:
             ocamlopt -v
             eval $(opam env)
             opam config exec -- make -s -j`nproc` STATICLINK=1 haxe
-            ldd -v ./haxe
+            ldd -v ./haxe || file ./haxe
             cp ./haxe "/artifacts/${artifact_name}"
       
       - name: Get haxe_bin
