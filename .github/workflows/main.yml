@@ -7,7 +7,7 @@ on: [push, pull_request]
 jobs:
   cancel:
     name: "Cancel previous runs"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-18.04
     timeout-minutes: 3
     steps:
       - uses: styfle/cancel-workflow-action@0.3.1
@@ -416,8 +416,6 @@ jobs:
         run: git config --global user.name "Robbot"
       - name: Set email
         run: git config --global user.email "robbot2019@robdangero.us"
-      - name: Add binary
-        run: git -C haxe_bin add -A
       - name: Commit binary
         id: commit
         continue-on-error: true
@@ -559,9 +557,6 @@ jobs:
         run: git config --global user.name "Robbot"
       - name: Set email
         run: git config --global user.email "robbot2019@robdangero.us"
-      - name: Is commit needed?
-        run: |
-          [[ `git -C haxe_bin status --porcelain` ]] && echo "NEEDCOMMIT=1" >> $GITHUB_ENV || echo "No changes to repository"
       - name: Commit binary
         id: commit
         continue-on-error: true
