@@ -16,6 +16,7 @@
     run: |
       set -ex
       opam init # --disable-sandboxing
+      opam switch install 4.13.1
       opam update
       opam pin add haxe . --no-action
       opam install haxe --deps-only
